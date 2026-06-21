@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sslpwn"
+version = "1.0.0"
+description = "A tool to test for BEAST, Lucky13, BREACH, POODLE, CRIME, Heartbleed, Ticketbleed, and ROBOT vulnerabilities, with adaptive evasion"
+license = {text = "AGPL-3.0-or-later"}
+authors = [
+    {name = "Nyakki Labs"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28.0",
+    "urllib3>=1.26.12",
+    "rich>=13.0.0",
+    "pyasn1>=0.4.8",
+]
+
+[project.scripts]
+sslpwn = "sslpwn.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sslpwn*"]
