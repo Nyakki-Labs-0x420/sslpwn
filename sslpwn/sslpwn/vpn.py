@@ -1,4 +1,4 @@
-"""Interface with mullvad-cli for IP rotation."""
+"""Interface with mullvad-cli for IP rotation with optional country selection."""
 import subprocess
 import shutil
 import time
@@ -35,9 +35,25 @@ class MullvadVPN:
             logger.error("Error checking Mullvad status: %s", exc)
             return False
 
-    def connect(self) -> None:
-        """Connect to Mullvad (random server)."""
+    def connect(self, location: Optional[str] = None) -> None:
+        """
+        Connect to Mullvad. If `location` is provided (e.g. 'us', 'de', 'jp'),
+        set the relay location b4 connecting.
+        """
         logger.info("Connecting to Mullvad...")
+        if location:
+            try:
+                subprocess.run(
+                    ["mullvad", "relay", "set", "location", location],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                logger.info("Mullvad relay location set to %s", location)
+            except subprocess.CalledProcessError as exc:
+                logger.error("Failed to set Mullvad location: %s", exc.stderr)
+                # Fall through; but def is gon connect anyway (itll js use last loc)
         try:
             subprocess.run(
                 ["mullvad", "connect"],
@@ -66,13 +82,16 @@ class MullvadVPN:
             logger.error("Mullvad disconnect failed: %s", exc.stderr)
             raise RuntimeError("Mullvad disconnect failed.") from exc
 
-    def rotate_ip(self, max_retries: int = 3) -> None:
-        """Obtain a new IP address by disconnecting and reconnecting."""
+    def rotate_ip(self, location: Optional[str] = None, max_retries: int = 3) -> None:
+        """
+        Obtain a new IP addr by disconnecting and reconnecting.
+        If `location` is given, connect to that country.
+        """
         for attempt in range(1, max_retries + 1):
             try:
                 self.disconnect()
                 time.sleep(1)
-                self.connect()
+                self.connect(location=location)
                 return
             except RuntimeError:
                 logger.warning("Rotation attempt %d failed.", attempt)
