@@ -7,3 +7,6 @@ from .crime import CrimeAttack
 from .heartbleed import HeartbleedAttack
 from .ticketbleed import TicketbleedAttack
 from .robot import RobotAttack
+from .renegotiation import RenegotiationAttack
+from .freak import FreakAttack
+from .logjam import LogjamAttack
