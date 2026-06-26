@@ -20,7 +20,7 @@ sslpwn is a security research tool for testing HTTPS servers against eleven SSL/
 
 ## Features
 
-- Scan mode that checks all eleven vulnerabilities concurrently using a configurable thread pool.
+- Scan mode that checks all eleven vulnerabilities concurrently using asyncio and aiohttp for non-blocking I/O.
 - Interactive prompt to start exploitation after scanning (can be skipped with `-y`).
 - Full exploit implementations that recover user-supplied test cookies or tokens.
 - Adaptive rate-limiting evasion with exponential backoff, VPN rotation, browser fingerprint swapping, and per-profile TLS client certificate generation.
@@ -44,7 +44,7 @@ This tool is intended exclusively for authorised security testing on systems you
 ### From source
 
 ```bash
-git clone https://github.com/nyakki-labs-0x420/sslpwn.git
+git clone https://github.com/Nyakki-Labs-0x420/sslpwn.git
 cd sslpwn
 pip install .
 ```
@@ -60,6 +60,7 @@ All required packages are declared in `pyproject.toml` and installed automatical
 - `rich>=13.0.0`
 - `pyasn1>=0.4.8`
 - `cryptography>=41.0.0`
+- `aiohttp>=3.9.0`
 
 ## Usage
 
@@ -69,7 +70,7 @@ All required packages are declared in `pyproject.toml` and installed automatical
 sslpwn --scan https://target.com
 ```
 
-Scans for all eleven vulnerabilities and writes a report to `reports/<hostname>/report.{md,txt,html}`. If vulnerabilities are found, you will be asked whether to exploit them. Use `-y` to skip the prompt.
+Scans for all eleven vulnerabilities concurrently using asyncio. A report is written to `reports/<hostname>/report.{md,txt,html}`. If vulnerabilities are found, you will be asked whether to exploit them. Use `-y` to skip the prompt.
 
 **Credentials for exploitation:**
 - Cookie-based attacks (BEAST, Lucky13, POODLE, Heartbleed, Ticketbleed, ROBOT, Renegotiation) require `--cookie-name` and `--cookie-value`.
@@ -102,13 +103,13 @@ sslpwn --module beast https://target.com --cookie-name session --cookie-value su
 | `--adaptive-threshold` | Consecutive errors before evasion (default 3) |
 | `--adaptive-backoff-base` | Initial backoff time in seconds (default 1.0) |
 | `--adaptive-max-backoff` | Maximum backoff time in seconds (default 60.0) |
-| `--threads` | Number of threads for concurrent scanning (default 4) |
+| `--threads` | Number of concurrent tasks for scanning (default 4) |
 | `-y`, `--yes` | Auto-answer yes to exploitation prompt |
 | `--version` | Show version and exit |
 
 ### Examples
 
-Scan with adaptive evasion and 8 threads, auto-exploit:
+Scan with adaptive evasion and 8 concurrent tasks, auto-exploit:
 
 ```bash
 sslpwn --scan https://vulnerable.example.com -y \
@@ -134,7 +135,7 @@ sslpwn --module lucky13 https://target.com \
 
 ### Scanning
 
-Each attack module implements a `check_vulnerability()` method that performs a quick probe:
+Scanning is performed asynchronously using `asyncio` and `aiohttp`. Each attack module's `check_vulnerability_async()` method is run as a coroutine, with a semaphore controlling the maximum number of concurrent checks. This design allows the tool to perform many network probes in parallel without the overhead of operating system threads.
 
 - BEAST, Lucky13, POODLE: attempt handshakes with the specific protocol version and CBC ciphers.
 - CRIME: check if TLS compression is accepted.
@@ -146,24 +147,20 @@ Each attack module implements a `check_vulnerability()` method that performs a q
 - FREAK: check if export RSA ciphers are accepted.
 - Logjam: check if export DHE ciphers are accepted.
 
-All checks run concurrently using a configurable thread pool (`--threads`).
-
 ### Exploitation
 
-After the scan, you can run full exploits. Each module's `exploit()` method performs the actual cryptographic attack and verifies the result against the provided test cookie or token.
-
-For cookie-based attacks, the tool decrypts the supplied cookie value from the encrypted traffic and compares it to the original. For compression-based attacks, it recovers the reflected token byte by byte. Renegotiation injects a plaintext request into an existing TLS session. FREAK and Logjam log the server's weak public parameters for offline factoring by the operator.
+After the scan, full exploits are available. Each module's `exploit()` method performs the actual cryptographic attack and verifies the result against a known test secret. For cookie-based attacks, the tool decrypts the supplied cookie from the encrypted traffic. For compression-based attacks, it recovers the reflected token byte by byte. Renegotiation injects a plaintext request into an existing TLS session. FREAK and Logjam log the server's weak public parameters for offline factoring.
 
 ### Adaptive evasion
 
-When enabled with `--adaptive`, the tool monitors HTTP status codes (403, 404, 420, 429, 500, 502, 503), `Retry-After` headers, and connection errors. If the number of consecutive indicators reaches the threshold, the tool executes an evasion cycle:
+When enabled with `--adaptive`, the tool monitors HTTP status codes (403, 404, 420, 429, 500, 502, 503), `Retry-After` headers, and connection errors. If the number of consecutive indicators reaches the threshold, an evasion cycle is triggered:
 
 1. Exponential backoff with random jitter.
 2. VPN IP rotation (if available), using the new device profile's country code to select an exit node.
 3. Replacement of the entire browser fingerprint: User-Agent, Sec-CH-UA headers, viewport, screen resolution, colour depth, DPR, device memory, and TLS cipher preferences.
 4. Generation of a new self-signed X.509 client certificate with subject fields matching the selected profile.
 
-The cycle repeats each time rate limiting is detected, making successive requests appear to originate from different devices, browsers, and geographic locations.
+This cycle repeats each time rate limiting is detected, making successive requests appear to originate from different devices, browsers, and geographic locations.
 
 ## Output and reports
 
@@ -174,6 +171,16 @@ Results are saved in `reports/<hostname>/` as three files:
 - `report.html`
 
 A raw log file `<hostname>_sslpwn_results.txt` is also written to the output directory. If the tool is interrupted with Ctrl+C, pending results are saved before exit.
+
+## Planned updates (v3)
+
+The following features are under development for the next release:
+
+- **Tor network integration**: Ability to route all traffic through the Tor network, including automatic circuit rotation and hidden service scanning.
+- **Extended device profile library**: Additional device profiles covering more phones, tablets, laptops, and IoT devices, each with accurate screen metrics and TLS fingerprints.
+- **Proxy chain support**: Chaining of SOCKS5 and HTTP proxies before the VPN exit for additional anonymity layers.
+- **Custom JA3/JA4 fingerprint injection**: Full control over the TLS client hello fingerprint to mimic specific browsers beyond the currently supported ciphers.
+- **Additional exploits**: DROWN, POODLE TLS, Zombie POODLE, and GOLDENDOODLE attacks.
 
 ## License
 
