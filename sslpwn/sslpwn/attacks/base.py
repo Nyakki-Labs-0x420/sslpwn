@@ -39,6 +39,14 @@ class BaseAttack(ABC):
         """
         ...
 
+    async def check_vulnerability_async(self) -> bool:
+        """
+        Async version of the vulnerability check. Defaults to running the
+        sync version in a thread. Override in modules that use aiohttp.
+        """
+        import asyncio
+        return await asyncio.to_thread(self.check_vulnerability)
+
     @abstractmethod
     def exploit(self) -> bool:
         """
