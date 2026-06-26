@@ -1,8 +1,8 @@
-"""Command‑line interface for sslpwn; scan and exploit mode with multi‑threading."""
+"""Command‑line interface for sslpwn."""
 
 import argparse
 import sys
-import concurrent.futures
+import asyncio
 from typing import Optional, List, Dict, Any
 
 from sslpwn import __version__
@@ -23,15 +23,12 @@ from sslpwn.attacks import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Test for SSL/TLS vulnerabilities. Scan all or exploit a single module with adaptive evasion.",
+        description="Test for SSL/TLS vulnerabilities; scan all or exploit a single module with adaptive evasion.",
         epilog="Use responsibly and only on systems you own or are authorised to test.",
     )
     parser.add_argument("target", help="Target HTTPS URL, e.g. https://example.com")
-    parser.add_argument("--scan", action="store_true",
-                        help="Scan for all vulnerabilities, report findings, then optionally exploit.")
-    parser.add_argument("--module", choices=["beast", "lucky13", "breach", "poodle", "crime", "heartbleed",
-                                             "ticketbleed", "robot", "renegotiation", "freak", "logjam"],
-                        help="Exploit a single module (ignored if --scan is set).")
+    parser.add_argument("--scan", action="store_true", help="Scan for all vulnerabilities, report findings, then optionally exploit.")
+    parser.add_argument("--module", choices=["beast", "lucky13", "breach", "poodle", "crime", "heartbleed", "ticketbleed", "robot", "renegotiation", "freak", "logjam"], help="Exploit a single module (ignored if --scan is set).")
     parser.add_argument("--cookie-name", help="Cookie name to decrypt (required for cookie‑based modules).")
     parser.add_argument("--cookie-value", help="Known test cookie value for verification (required for cookie‑based modules).")
     parser.add_argument("--token-parameter", help="GET parameter that reflects the token (BREACH/CRIME).")
@@ -44,9 +41,8 @@ def main() -> None:
     parser.add_argument("--adaptive-threshold", type=int, default=3, help="Consecutive errors before evasion.")
     parser.add_argument("--adaptive-backoff-base", type=float, default=1.0, help="Initial backoff time.")
     parser.add_argument("--adaptive-max-backoff", type=float, default=60.0, help="Maximum backoff time.")
-    parser.add_argument("--threads", type=int, default=4, help="Number of threads for concurrent scanning (default 4).")
-    parser.add_argument("--yes", "-y", action="store_true",
-                        help="Automatically answer yes to all prompts (exploit all found vulnerabilities).")
+    parser.add_argument("--threads", type=int, default=4, help="Number of concurrent tasks for scanning (default 4).")
+    parser.add_argument("--yes", "-y", action="store_true", help="Automatically answer yes to all prompts (exploit all found vulnerabilities).")
     parser.add_argument("--version", action="version", version=f"sslpwn {__version__}")
 
     args = parser.parse_args()
@@ -85,9 +81,9 @@ def main() -> None:
             error_threshold=args.adaptive_threshold,
         )
 
-    # scan mode; use thread pool for concurrent checks
+    # scan mode; use asyncio for concurrent checks
     if args.scan:
-        scan_and_handle(target, output, vpn, ua, limiter, adaptive, args)
+        asyncio.run(scan_and_handle(target, output, vpn, ua, limiter, adaptive, args))
     else:
         if not args.module:
             console.print("[bold red]Either --scan or --module must be specified.[/bold red]")
@@ -100,11 +96,11 @@ def main() -> None:
     output.finalise()
 
 
-def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
-    """Run all vulnerability checks concurrently, report, and prompt for exploitation."""
+async def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
+    """Run all vulnerability checks concurrently (asyncio), report, and prompt for exploitation."""
     output.log(f"Starting vulnerability scan on {target}", "INFO")
 
-    # Instantiate attacks with dummy params; checks don't need them.
+    # Instantiate attacks with dummy parameters
     modules = {
         "BEAST": BeastAttack(target, output, vpn, ua, limiter, "", "", adaptive),
         "Lucky13": Lucky13Attack(target, output, vpn, ua, limiter, "", "", adaptive),
@@ -122,11 +118,11 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
     findings = []
     vulnerable_modules = []
 
-    def check_one(name, attack):
+    async def check_one(name, attack):
         console.print(f"Checking {name}...", style="bold")
         output.log(f"Checking {name}...", "INFO")
         try:
-            is_vuln = attack.check_vulnerability()
+            is_vuln = await attack.check_vulnerability_async()
             status = "VULNERABLE" if is_vuln else "NOT VULNERABLE"
             console.print(f"  {name}: {status}")
             return (name, is_vuln, None)
@@ -135,19 +131,20 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
             output.log(f"Check {name} failed: {e}", "ERROR")
             return (name, False, str(e))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
-        future_to_name = {executor.submit(check_one, n, a): n for n, a in modules.items()}
-        for future in concurrent.futures.as_completed(future_to_name):
-            name = future_to_name[future]
-            try:
-                n, vuln, err = future.result()
-            except Exception as exc:
-                console.print(f"  {name}: EXCEPTION - {exc}", style="red")
-                findings.append({"name": name, "vulnerable": False, "error": str(exc)})
-                continue
-            findings.append({"name": n, "vulnerable": vuln, "error": err or ""})
-            if vuln:
-                vulnerable_modules.append(n)
+    # Run all checks concurrently with a semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(args.threads)
+
+    async def limited_check(name, attack):
+        async with semaphore:
+            return await check_one(name, attack)
+
+    tasks = [limited_check(n, a) for n, a in modules.items()]
+    results = await asyncio.gather(*tasks)
+
+    for name, is_vuln, error in results:
+        findings.append({"name": name, "vulnerable": is_vuln, "error": error or ""})
+        if is_vuln:
+            vulnerable_modules.append(name)
 
     # Write initial report
     report_writer = ReportWriter(safe_filename(target.split("://")[1].split("/")[0]), "reports")
@@ -180,7 +177,7 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
         console.print("[yellow]BREACH/CRIME require --token‑parameter.[/yellow]")
         args.token_parameter = console.input("Token parameter: ").strip()
 
-    # Run exploits sequentially (exploits are long and may overlap in network, but adaptive handles evasion)
+    # Run exploits sequentially (exploits are long)
     for name in vulnerable_modules:
         console.print(f"\n[bold]Exploiting {name}...[/bold]")
         output.log(f"Starting exploit for {name}", "INFO")
@@ -248,7 +245,6 @@ def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
 
 def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
     """Run the specified module's exploit directly."""
-    # Ensure required parameters are present
     if args.module in ("beast", "lucky13", "poodle", "heartbleed", "ticketbleed", "robot", "renegotiation"):
         if not args.cookie_name or not args.cookie_value:
             console.print("[bold red]This module requires --cookie-name and --cookie-value.[/bold red]")
@@ -290,10 +286,9 @@ def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
     else:
         output.log("Exploit failed.", "WARN")
 
-    # Write a minimal report for this single exploit
     findings = [{
         "name": args.module,
-        "vulnerable": True,  # we assume vulnerability because we are exploiting
+        "vulnerable": True,
         "exploit_success": success,
         "details": "Exploit completed" if success else "Exploit did not succeed"
     }]
