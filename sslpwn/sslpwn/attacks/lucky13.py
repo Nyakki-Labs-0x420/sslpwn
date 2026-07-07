@@ -16,8 +16,8 @@ from sslpwn.attacks.base import BaseAttack
 
 class Lucky13Attack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
-                 cookie_name: str, cookie_value: str, adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 cookie_name: str, cookie_value: str, adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
         self._num_timing_samples = 5
@@ -134,9 +134,6 @@ class Lucky13Attack(BaseAttack):
                 "ERROR"
             )
             return False
-
-    # (helper methods _capture_request_record, _send_raw_record_and_measure, _construct_modified_record
-    #  are identical to those given earlier; included below for completeness)
 
     def _capture_request_record(self, hostname: str, port: int,
                                 request: bytes) -> Tuple[bytes, bytes]:
