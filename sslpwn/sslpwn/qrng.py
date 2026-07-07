@@ -1,13 +1,18 @@
 """
 Quantum Random Number Generator (QRNG) module for sslpwn.
 
-Fetches true quantum randomness from free, no‑auth REST APIs.
-Integrates with the adaptive evasion system for unpredictable behavior.
+Primary source of randomness is the free QRNG APIs (atomadic.tech,
+freeuniversesplitter.com, lizaonair.com). If all QRNG sources fail,
+we fall back to secrets.SystemRandom() (OS CSPRNG).
+
+This module is designed to use quantum entropy as the default,
+with classical entropy only as a backup.
 """
 
 import os
 import logging
 import random
+import secrets
 import time
 from typing import Optional, Union, Dict, Any
 from dataclasses import dataclass, field
@@ -35,10 +40,10 @@ class QuantumRNG:
     """
     Quantum Random Number Generator client.
 
-    Supports multiple free QRNG APIs with automatic fallback.
+    Primary source: free QRNG APIs (atomadic.tech, freeuniversesplitter.com, lizaonair.com)
+    Fallback: secrets.SystemRandom() (OS CSPRNG)
     """
 
-    # Available QRNG endpoints
     ENDPOINTS = {
         "atomadic": "https://atomadic.tech/v1/rng/quantum",
         "freeuniversesplitter": "https://api.freeuniversesplitter.com/rndnum",
@@ -51,39 +56,30 @@ class QuantumRNG:
         pTimeoutSeconds: int = 5,
         pMaxRetries: int = 2,
     ) -> None:
-        """
-        Initialize the QRNG client.
-
-        Args:
-            pPreferredSource: Preferred API source ('atomadic', 'freeuniversesplitter', 'lizaonair')
-            pTimeoutSeconds: HTTP timeout per request
-            pMaxRetries: Number of fallback attempts if primary fails
-        """
         self._preferred_source = pPreferredSource
         self._timeout = pTimeoutSeconds
         self._max_retries = pMaxRetries
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "sslpwn-qrng/2.1.0"})
         self._last_result: Optional[QRNGResult] = None
+        self._fallback_random = secrets.SystemRandom()  # only used if QRNG fails
 
     def get_random_int(self, pMin: int = 0, pMax: int = 2**32 - 1) -> int:
         """
         Get a true quantum random integer in the range [min, max].
+        Tries QRNG APIs first; falls back to secrets.SystemRandom() if all fail.
 
         Args:
             pMin: Minimum value (inclusive)
             pMax: Maximum value (inclusive)
 
         Returns:
-            A quantum‑derived random integer.
-
-        Raises:
-            RuntimeError: If all QRNG sources fail.
+            A random integer – preferably quantum‑derived.
         """
         if pMin > pMax:
             raise ValueError("pMin must be <= pMax")
 
-        # Try each source in order of preference
+        # Primary: try QRNG sources (in preferred order)
         sources = [self._preferred_source] + [
             s for s in self.ENDPOINTS.keys() if s != self._preferred_source
         ]
@@ -99,24 +95,17 @@ class QuantumRNG:
                 logger.warning(f"QRNG source {source} failed: {e}")
                 continue
 
-        raise RuntimeError("All QRNG sources failed. Falling back to classical PRNG.")
+        # Fallback: OS CSPRNG
+        logger.warning("All QRNG sources failed. Falling back to secrets.SystemRandom().")
+        return self._fallback_random.randint(pMin, pMax)
 
     def get_random_bytes(self, pNumBytes: int) -> bytes:
         """
-        Get quantum random bytes.
-
-        Args:
-            pNumBytes: Number of random bytes to generate.
-
-        Returns:
-            Bytes object containing quantum‑derived randomness.
+        Get quantum random bytes (or fallback) using QRNG APIs.
         """
-        # Get a large random integer and convert to bytes
         if pNumBytes <= 4:
             value = self.get_random_int(0, (1 << (pNumBytes * 8)) - 1)
             return value.to_bytes(pNumBytes, "big")
-
-        # For larger requests, fetch multiple integers
         result = b""
         remaining = pNumBytes
         while remaining > 0:
@@ -125,11 +114,9 @@ class QuantumRNG:
             value = self.get_random_int(0, max_val)
             result += value.to_bytes(chunk_size, "big")
             remaining -= chunk_size
-
         return result
 
     def get_random_hex(self, pNumBytes: int) -> str:
-        """Get quantum random bytes as a hex string."""
         return self.get_random_bytes(pNumBytes).hex()
 
     def _fetch_from_source(
@@ -138,9 +125,6 @@ class QuantumRNG:
         pMin: int,
         pMax: int,
     ) -> Optional[QRNGResult]:
-        """
-        Fetch a random integer from a specific QRNG source.
-        """
         url = self.ENDPOINTS.get(pSource)
         if not url:
             return None
@@ -159,7 +143,6 @@ class QuantumRNG:
             return None
 
     def _fetch_atomadic(self, url: str, pMin: int, pMax: int) -> Optional[QRNGResult]:
-        """Fetch from atomadic.tech (256‑bit hex)."""
         resp = self._session.get(url, timeout=self._timeout)
         resp.raise_for_status()
         data = resp.json()
@@ -182,7 +165,6 @@ class QuantumRNG:
     def _fetch_freeuniversesplitter(
         self, url: str, pMin: int, pMax: int
     ) -> Optional[QRNGResult]:
-        """Fetch from freeuniversesplitter.com (plain text integer)."""
         resp = self._session.get(url, timeout=self._timeout)
         resp.raise_for_status()
 
@@ -198,7 +180,6 @@ class QuantumRNG:
         )
 
     def _fetch_lizaonair(self, url: str, pMin: int, pMax: int) -> Optional[QRNGResult]:
-        """Fetch from lizaonair.com (JSON with 'value' field)."""
         params = {"min": pMin, "max": pMax}
         headers = {"Accept": "application/json"}
         resp = self._session.get(url, params=params, headers=headers, timeout=self._timeout)
@@ -217,12 +198,10 @@ class QuantumRNG:
         )
 
 
-# Global singleton
 _g_qrng: Optional[QuantumRNG] = None
 
 
 def get_qrng() -> QuantumRNG:
-    """Get or create the global QRNG instance."""
     global _g_qrng
     if _g_qrng is None:
         _g_qrng = QuantumRNG()
@@ -230,15 +209,12 @@ def get_qrng() -> QuantumRNG:
 
 
 def quantum_random_int(pMin: int = 0, pMax: int = 2**32 - 1) -> int:
-    """Convenience function: get a quantum random integer."""
     return get_qrng().get_random_int(pMin, pMax)
 
 
 def quantum_random_bytes(pNumBytes: int) -> bytes:
-    """Convenience function: get quantum random bytes."""
     return get_qrng().get_random_bytes(pNumBytes)
 
 
 def quantum_random_hex(pNumBytes: int) -> str:
-    """Convenience function: get quantum random hex string."""
     return get_qrng().get_random_hex(pNumBytes)
