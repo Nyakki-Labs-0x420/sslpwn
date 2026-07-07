@@ -1,11 +1,8 @@
 """
 Quantum acceleration module for sslpwn using OpenQuantum Qiskit provider.
 
-Based on official openquantum-sdk-qiskit documentation:
-- from openquantum_sdk.qiskit import OpenQuantumService, SamplerV2, get_backend
-- Service loads saved account from keyring or environment variables
-- get_backend(backend_id, service=svc) returns the backend
-- SamplerV2 requires scheduler and config
+All Qiskit transpilation and circuit building is offloaded to threads
+to avoid blocking the asyncio event loop.
 """
 
 import os
@@ -13,6 +10,7 @@ import logging
 import math
 import random
 import time
+import asyncio
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,7 +33,6 @@ except ImportError as e:
 
 @dataclass
 class QuantumJobResult:
-    """Container for quantum job execution results."""
     job_id: str
     status: str
     results: Optional[Dict[str, Any]] = None
@@ -47,15 +44,6 @@ class QuantumJobResult:
 
 
 class QuantumAccelerator:
-    """
-    Quantum accelerator client using OpenQuantum Qiskit service.
-
-    Based on official documentation:
-    - OpenQuantumService() loads saved account from keyring/env
-    - get_backend(backend_id, service=svc) returns backend
-    - SamplerV2(backend=backend, scheduler=svc.scheduler, config=config)
-    """
-
     def __init__(
         self,
         pDefaultBackend: Optional[str] = None,
@@ -74,10 +62,6 @@ class QuantumAccelerator:
 
     def _initialize_service(self) -> None:
         try:
-            # OpenQuantumService() auto-loads saved account from keyring/env
-            # Credentials can be set via:
-            #   OPENQUANTUM_CLIENT_ID and OPENQUANTUM_CLIENT_SECRET env vars
-            # Or by running OpenQuantumService.save_account() once
             self._service = OpenQuantumService()
             self._backend = get_backend(self._default_backend, service=self._service)
             logger.info("OpenQuantum Qiskit service initialized successfully.")
@@ -86,33 +70,30 @@ class QuantumAccelerator:
             logger.error("Failed to initialize OpenQuantum service: %s", exc)
             raise RuntimeError(f"OpenQuantum service initialization failed: {exc}") from exc
 
-    def submit_circuit(
+    def _submit_circuit_sync(
         self,
         pCircuit: QuantumCircuit,
-        pBackendId: Optional[str] = None,
-        pShots: Optional[int] = None,
-        pWaitForCompletion: bool = True,
-        pPollIntervalSeconds: float = 5.0,
+        pBackendId: str,
+        pShots: int,
+        pWaitForCompletion: bool,
+        pPollIntervalSeconds: float,
     ) -> QuantumJobResult:
         if self._service is None or self._backend is None:
             raise RuntimeError("OpenQuantum service not initialized.")
 
-        sBackendId = pBackendId or self._default_backend
-        nShots = pShots or self._default_shots
-
-        if sBackendId != self._default_backend:
-            backend = get_backend(sBackendId, service=self._service)
+        if pBackendId != self._default_backend:
+            backend = get_backend(pBackendId, service=self._service)
         else:
             backend = self._backend
 
-        logger.info("Submitting circuit to backend: %s", sBackendId)
+        logger.info("Submitting circuit to backend: %s", pBackendId)
         logger.debug("Circuit:\n%s", pCircuit)
 
         try:
             transpiled_circuit = transpile(pCircuit, backend=backend)
 
             config = {
-                "backend_class_id": sBackendId,
+                "backend_class_id": pBackendId,
                 "job_subcategory_id": "oth:oth",
                 "name": f"sslpwn_shor_{int(time.time())}",
                 "execution_plan": "auto",
@@ -126,20 +107,19 @@ class QuantumAccelerator:
                 export_format="qasm3",
             )
 
-            # Run the job: circuit, parameter values (None), shots
-            job = sampler.run([(transpiled_circuit, None, nShots)])
+            job = sampler.run([(transpiled_circuit, None, pShots)])
 
             objResult = QuantumJobResult(
                 job_id=job.job_id(),
                 status="RUNNING",
-                backend_id=sBackendId,
-                shots=nShots,
+                backend_id=pBackendId,
+                shots=pShots,
             )
 
             logger.info("Job submitted successfully. Job ID: %s", objResult.job_id)
 
             if pWaitForCompletion:
-                objResult = self._wait_for_completion(objResult, pPollIntervalSeconds)
+                objResult = self._wait_for_completion_sync(objResult, pPollIntervalSeconds)
 
             return objResult
 
@@ -149,11 +129,11 @@ class QuantumAccelerator:
                 job_id="",
                 status="ERROR",
                 error=str(exc),
-                backend_id=sBackendId,
-                shots=nShots,
+                backend_id=pBackendId,
+                shots=pShots,
             )
 
-    def _wait_for_completion(
+    def _wait_for_completion_sync(
         self,
         pJobResult: QuantumJobResult,
         pPollIntervalSeconds: float = 5.0,
@@ -166,15 +146,12 @@ class QuantumAccelerator:
         nElapsed = 0.0
         while nElapsed < self._timeout_seconds:
             try:
-                # Get job status using the service's scheduler
                 job = self._service.scheduler.get_job(pJobResult.job_id)
                 status = job.status()
                 pJobResult.status = status
 
                 if status in ("completed", "succeeded", "DONE", "COMPLETED"):
-                    # Download and parse results
                     output = self._service.scheduler.download_job_output(job)
-                    # Parse counts from output
                     if isinstance(output, dict) and "counts" in output:
                         counts = output["counts"]
                     else:
@@ -203,6 +180,32 @@ class QuantumAccelerator:
         logger.error("Job %s timed out.", pJobResult.job_id)
         return pJobResult
 
+    async def submit_circuit_async(
+        self,
+        pCircuit: QuantumCircuit,
+        pBackendId: Optional[str] = None,
+        pShots: Optional[int] = None,
+        pWaitForCompletion: bool = True,
+        pPollIntervalSeconds: float = 5.0,
+    ) -> QuantumJobResult:
+        if self._service is None or self._backend is None:
+            raise RuntimeError("OpenQuantum service not initialized.")
+
+        sBackendId = pBackendId or self._default_backend
+        nShots = pShots or self._default_shots
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            self._submit_circuit_sync,
+            pCircuit,
+            sBackendId,
+            nShots,
+            pWaitForCompletion,
+            pPollIntervalSeconds,
+        )
+        return result
+
     def get_backends(self) -> List[Dict[str, Any]]:
         if self._service is None:
             return []
@@ -224,7 +227,7 @@ class QuantumAccelerator:
 
 
 # -----------------------------------------------------------------------------
-# Shor's algorithm circuit generation using Qiskit
+# Shor's algorithm circuit generation
 # -----------------------------------------------------------------------------
 
 def build_shor_circuit(pN: int, pA: int) -> QuantumCircuit:
@@ -355,11 +358,12 @@ def factor_rsa_with_quantum(
 
         try:
             circuit = build_shor_circuit(pN, a)
-            result = pAccelerator.submit_circuit(
-                pCircuit=circuit,
-                pBackendId=pBackendId,
-                pShots=pShots,
-                pWaitForCompletion=True,
+            result = pAccelerator._submit_circuit_sync(
+                circuit,
+                pBackendId or pAccelerator._default_backend,
+                pShots,
+                True,
+                5.0,
             )
 
             if result.status not in ("completed", "succeeded", "DONE", "COMPLETED"):
