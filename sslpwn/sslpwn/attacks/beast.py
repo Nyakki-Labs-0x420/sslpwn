@@ -14,8 +14,8 @@ from sslpwn.attacks.base import BaseAttack
 
 class BeastAttack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
-                 cookie_name: str, cookie_value: str, adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 cookie_name: str, cookie_value: str, adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
 
