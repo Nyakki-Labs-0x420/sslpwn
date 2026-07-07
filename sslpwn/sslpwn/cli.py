@@ -19,12 +19,13 @@ from sslpwn.attacks import (
     CrimeAttack, HeartbleedAttack, TicketbleedAttack, RobotAttack,
     RenegotiationAttack, FreakAttack, LogjamAttack,
 )
+from sslpwn.quantum import QuantumAccelerator, get_quantum_accelerator
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Test for SSL/TLS vulnerabilities; scan all or exploit a single module with adaptive evasion.",
-        epilog="Use responsibly and only on systems you own or are authorised to test.",
+        description="Test for SSL/TLS vulnerabilities; scan all or exploit a single module with adaptive evasion and quantum acceleration.",
+        epilog="Use responsibly and only on systems you own or are authorized to test.",
     )
     parser.add_argument("target", help="Target HTTPS URL, e.g. https://example.com")
     parser.add_argument("--scan", action="store_true", help="Scan for all vulnerabilities, report findings, then optionally exploit.")
@@ -44,6 +45,30 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=4, help="Number of concurrent tasks for scanning (default 4).")
     parser.add_argument("--yes", "-y", action="store_true", help="Automatically answer yes to all prompts (exploit all found vulnerabilities).")
     parser.add_argument("--version", action="version", version=f"sslpwn {__version__}")
+
+    # Quantum computing arguments (Qiskit + OpenQuantum)
+    parser.add_argument(
+        "--quantum",
+        action="store_true",
+        help="Enable quantum acceleration using OpenQuantum Qiskit provider.",
+    )
+    parser.add_argument(
+        "--quantum-backend",
+        default="rigetti:cepheus-1-108q",
+        help="OpenQuantum backend ID (default: rigetti:cepheus-1-108q).",
+    )
+    parser.add_argument(
+        "--quantum-shots",
+        type=int,
+        default=1024,
+        help="Number of shots for quantum circuits (default 1024).",
+    )
+    parser.add_argument(
+        "--quantum-timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for quantum jobs (default 600).",
+    )
 
     args = parser.parse_args()
 
@@ -81,14 +106,27 @@ def main() -> None:
             error_threshold=args.adaptive_threshold,
         )
 
+    # Initialize quantum accelerator if enabled
+    quantum = None
+    if args.quantum:
+        try:
+            quantum = QuantumAccelerator(
+                pDefaultBackend=args.quantum_backend,
+                pDefaultShots=args.quantum_shots,
+                pTimeoutSeconds=args.quantum_timeout,
+            )
+            console.print("[green]Quantum acceleration enabled.[/green]")
+        except Exception as exc:
+            console.print(f"[yellow]Quantum acceleration disabled: {exc}[/yellow]")
+
     # scan mode; use asyncio for concurrent checks
     if args.scan:
-        asyncio.run(scan_and_handle(target, output, vpn, ua, limiter, adaptive, args))
+        asyncio.run(scan_and_handle(target, output, vpn, ua, limiter, adaptive, quantum, args))
     else:
         if not args.module:
             console.print("[bold red]Either --scan or --module must be specified.[/bold red]")
             sys.exit(1)
-        run_single_exploit(args, target, output, vpn, ua, limiter, adaptive)
+        run_single_exploit(args, target, output, vpn, ua, limiter, adaptive, quantum)
 
     # clean up adaptive manager
     if adaptive:
@@ -96,23 +134,23 @@ def main() -> None:
     output.finalise()
 
 
-async def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
+async def scan_and_handle(target, output, vpn, ua, limiter, adaptive, quantum, args):
     """Run all vulnerability checks concurrently (asyncio), report, and prompt for exploitation."""
     output.log(f"Starting vulnerability scan on {target}", "INFO")
 
     # Instantiate attacks with dummy parameters
     modules = {
-        "BEAST": BeastAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "Lucky13": Lucky13Attack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "POODLE": PoodleAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "CRIME": CrimeAttack(target, output, vpn, ua, limiter, "", 10, adaptive),
-        "BREACH": BreachAttack(target, output, vpn, ua, limiter, "", 10, adaptive),
-        "Heartbleed": HeartbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "Ticketbleed": TicketbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "ROBOT": RobotAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "Renegotiation": RenegotiationAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "FREAK": FreakAttack(target, output, vpn, ua, limiter, "", "", adaptive),
-        "Logjam": LogjamAttack(target, output, vpn, ua, limiter, "", "", adaptive),
+        "BEAST": BeastAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "Lucky13": Lucky13Attack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "POODLE": PoodleAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "CRIME": CrimeAttack(target, output, vpn, ua, limiter, "", 10, adaptive, quantum),
+        "BREACH": BreachAttack(target, output, vpn, ua, limiter, "", 10, adaptive, quantum),
+        "Heartbleed": HeartbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "Ticketbleed": TicketbleedAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "ROBOT": RobotAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "Renegotiation": RenegotiationAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "FREAK": FreakAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
+        "Logjam": LogjamAttack(target, output, vpn, ua, limiter, "", "", adaptive, quantum),
     }
 
     findings = []
@@ -186,37 +224,37 @@ async def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
         try:
             if name == "BEAST":
                 attack = BeastAttack(target, output, vpn, ua, limiter,
-                                     args.cookie_name, args.cookie_value, adaptive)
+                                     args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "Lucky13":
                 attack = Lucky13Attack(target, output, vpn, ua, limiter,
-                                       args.cookie_name, args.cookie_value, adaptive)
+                                       args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "POODLE":
                 attack = PoodleAttack(target, output, vpn, ua, limiter,
-                                      args.cookie_name, args.cookie_value, adaptive)
+                                      args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "CRIME":
                 attack = CrimeAttack(target, output, vpn, ua, limiter,
-                                     args.token_parameter, args.mask_length, adaptive)
+                                     args.token_parameter, args.mask_length, adaptive, quantum)
             elif name == "BREACH":
                 attack = BreachAttack(target, output, vpn, ua, limiter,
-                                      args.token_parameter, args.mask_length, adaptive)
+                                      args.token_parameter, args.mask_length, adaptive, quantum)
             elif name == "Heartbleed":
                 attack = HeartbleedAttack(target, output, vpn, ua, limiter,
-                                          args.cookie_name, args.cookie_value, adaptive)
+                                          args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "Ticketbleed":
                 attack = TicketbleedAttack(target, output, vpn, ua, limiter,
-                                           args.cookie_name, args.cookie_value, adaptive)
+                                           args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "ROBOT":
                 attack = RobotAttack(target, output, vpn, ua, limiter,
-                                     args.cookie_name, args.cookie_value, adaptive)
+                                     args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "Renegotiation":
                 attack = RenegotiationAttack(target, output, vpn, ua, limiter,
-                                             args.cookie_name, args.cookie_value, adaptive)
+                                             args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "FREAK":
                 attack = FreakAttack(target, output, vpn, ua, limiter,
-                                     args.cookie_name, args.cookie_value, adaptive)
+                                     args.cookie_name, args.cookie_value, adaptive, quantum)
             elif name == "Logjam":
                 attack = LogjamAttack(target, output, vpn, ua, limiter,
-                                      args.cookie_name, args.cookie_value, adaptive)
+                                      args.cookie_name, args.cookie_value, adaptive, quantum)
             else:
                 continue
 
@@ -243,7 +281,7 @@ async def scan_and_handle(target, output, vpn, ua, limiter, adaptive, args):
     output.log("Final reports updated.", "INFO")
 
 
-def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
+def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive, quantum):
     """Run the specified module's exploit directly."""
     if args.module in ("beast", "lucky13", "poodle", "heartbleed", "ticketbleed", "robot", "renegotiation"):
         if not args.cookie_name or not args.cookie_value:
@@ -255,27 +293,27 @@ def run_single_exploit(args, target, output, vpn, ua, limiter, adaptive):
             sys.exit(1)
 
     if args.module == "beast":
-        attack = BeastAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = BeastAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "lucky13":
-        attack = Lucky13Attack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = Lucky13Attack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "breach":
-        attack = BreachAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive)
+        attack = BreachAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive, quantum)
     elif args.module == "poodle":
-        attack = PoodleAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = PoodleAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "crime":
-        attack = CrimeAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive)
+        attack = CrimeAttack(target, output, vpn, ua, limiter, args.token_parameter, args.mask_length, adaptive, quantum)
     elif args.module == "heartbleed":
-        attack = HeartbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = HeartbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "ticketbleed":
-        attack = TicketbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = TicketbleedAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "robot":
-        attack = RobotAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = RobotAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "renegotiation":
-        attack = RenegotiationAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = RenegotiationAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "freak":
-        attack = FreakAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = FreakAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     elif args.module == "logjam":
-        attack = LogjamAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive)
+        attack = LogjamAttack(target, output, vpn, ua, limiter, args.cookie_name, args.cookie_value, adaptive, quantum)
     else:
         console.print("[bold red]Unknown module[/bold red]")
         sys.exit(1)
