@@ -15,8 +15,8 @@ from sslpwn.attacks.base import BaseAttack
 class CrimeAttack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
                  token_parameter: str, mask_length: int = 10,
-                 adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.token_parameter = token_parameter
         self.mask_length = mask_length
 
