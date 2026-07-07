@@ -13,8 +13,8 @@ from sslpwn.attacks.base import BaseAttack
 
 class LogjamAttack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
-                 cookie_name: str, cookie_value: str, adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 cookie_name: str, cookie_value: str, adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
 
@@ -69,9 +69,7 @@ class LogjamAttack(BaseAttack):
         try:
             ssl_sock = ctx.wrap_socket(sock, server_hostname=hostname)
             # We can't easily extract DH params from the Python ssl module.
-            # imma js log that the export cipher was accepted. To expl follow instr below XD
-            # I may do a writeup on how to accurately do this n have it b effective. mehhhhhh documentation, a red teamers worst nightmare amirite?
-            # But the heavy math is up to the user to do XD cz im no matha-magician
+            # We'll just log that the export cipher was accepted.
             self.output.log(
                 "Export DHE cipher accepted. Server is vulnerable to Logjam. "
                 "To exploit, capture the ServerKeyExchange with weak DH params and "
