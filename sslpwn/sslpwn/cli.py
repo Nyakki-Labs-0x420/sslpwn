@@ -70,6 +70,13 @@ def main() -> None:
         help="Timeout in seconds for quantum jobs (default 600).",
     )
 
+    # QRNG flag
+    parser.add_argument(
+        "--quantum-rng",
+        action="store_true",
+        help="Use true quantum randomness (QRNG) for all random operations in evasion.",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -104,7 +111,10 @@ def main() -> None:
             base_backoff=args.adaptive_backoff_base,
             max_backoff=args.adaptive_max_backoff,
             error_threshold=args.adaptive_threshold,
+            pUseQuantumRNG=args.quantum_rng,
         )
+        if args.quantum_rng:
+            console.print("[green]Quantum RNG enabled for evasion.[/green]")
 
     # Initialize quantum accelerator if enabled
     quantum = None
