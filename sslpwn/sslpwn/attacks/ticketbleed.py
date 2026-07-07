@@ -15,11 +15,11 @@ from sslpwn.attacks.base import BaseAttack
 
 class TicketbleedAttack(BaseAttack):
     def __init__(self, target_url: str, output, vpn, user_agents, rate_limiter,
-                 cookie_name: str, cookie_value: str, adaptive=None) -> None:
-        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive)
+                 cookie_name: str, cookie_value: str, adaptive=None, quantum=None) -> None:
+        super().__init__(target_url, output, vpn, user_agents, rate_limiter, adaptive, quantum)
         self.cookie_name = cookie_name
         self.cookie_value = cookie_value
-
+        
     def _build_client_hello(self, hostname: str) -> bytes:
         client_version = 0x0303
         gmt_unix_time = int(time.time())
