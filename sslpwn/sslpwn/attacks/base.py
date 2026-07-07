@@ -21,6 +21,7 @@ class BaseAttack(ABC):
         user_agents: UserAgentRotator,
         rate_limiter: RateLimiter,
         adaptive: Optional[AdaptiveManager] = None,
+        quantum: Optional['QuantumAccelerator'] = None,
     ) -> None:
         self.target_url = target_url
         self.output = output
@@ -28,11 +29,20 @@ class BaseAttack(ABC):
         self.user_agents = user_agents
         self.rate_limiter = rate_limiter
         self.adaptive = adaptive
+        # Lazy load quantum accelerator if not provided
+        if quantum is None:
+            try:
+                from sslpwn.quantum import get_quantum_accelerator
+                self.quantum = get_quantum_accelerator()
+            except ImportError:
+                self.quantum = None
+        else:
+            self.quantum = quantum
 
     @abstractmethod
     def check_vulnerability(self) -> bool:
         """
-        Perform a quick, low‑impact check to determine if the target is
+        Perform a quick, low-impact check to determine if the target is
         likely vulnerable to this attack.
 
         Returns True if vulnerability indicators are present.
