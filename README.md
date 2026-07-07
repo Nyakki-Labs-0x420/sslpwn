@@ -1,6 +1,8 @@
 # sslpwn
 
-sslpwn is a security research tool for testing HTTPS servers against eleven SSL/TLS vulnerabilities. It performs both detection and full cryptographic exploitation, recovering known test secrets to prove practical impact. The tool also includes an adaptive evasion system that rotates network identity, browser fingerprint, and TLS client certificates when rate limiting is encountered.
+sslpwn is a security research tool for testing HTTPS servers against eleven SSL/TLS vulnerabilities. It performs both detection and full cryptographic exploitation, recovering known test secrets to prove practical impact. The tool also includes an adaptive evasion system that rotates network identity, browser fingerprint, and TLS client certificates when rate limiting is encountered. **Quantum acceleration** is integrated via the OpenQuantum platform, enabling Shor’s algorithm to factor small RSA moduli on real quantum hardware (Rigetti Cepheus‑1‑108Q).
+
+---
 
 ## Vulnerabilities covered
 
@@ -18,20 +20,30 @@ sslpwn is a security research tool for testing HTTPS servers against eleven SSL/
 | FREAK        | CVE-2015-0204  | Export RSA key downgrade                           |
 | Logjam       | CVE-2015-4000  | Export DHE downgrade                               |
 
+---
+
 ## Features
 
-- Scan mode that checks all eleven vulnerabilities concurrently using asyncio and aiohttp for non-blocking I/O.
+- Scan mode that checks all eleven vulnerabilities concurrently using `asyncio` and `aiohttp` for non-blocking I/O.
 - Interactive prompt to start exploitation after scanning (can be skipped with `-y`).
-- Full exploit implementations that recover user-supplied test cookies or tokens.
-- Adaptive rate-limiting evasion with exponential backoff, VPN rotation, browser fingerprint swapping, and per-profile TLS client certificate generation.
-- Built-in set of realistic device profiles including viewport, screen resolution, colour depth, DPR, device memory, and locale.
+- Full exploit implementations that recover user‑supplied test cookies or tokens.
+- Adaptive rate‑limiting evasion with exponential backoff, VPN rotation, browser fingerprint swapping, and per‑profile TLS client certificate generation.
+- Built‑in set of realistic device profiles including viewport, screen resolution, colour depth, DPR, device memory, and locale.
 - Mullvad VPN integration with automatic country matching to the active device profile.
-- Multi-format report generation (Markdown, plain text, HTML).
+- Multi‑format report generation (Markdown, plain text, HTML).
 - Graceful interrupt handling that saves results on Ctrl+C.
+- **Quantum acceleration** (new in v2.1):  
+  - Submits Shor’s algorithm circuits to the OpenQuantum platform (Rigetti Cepheus‑1‑108Q QPU) using the `openquantum-sdk-qiskit` provider.  
+  - Automatically factors RSA moduli **≤ 512 bits** (currently limited by available qubits) and uses the factors to decrypt captured ciphertexts.  
+  - Seamless fallback to classical Bleichenbacher attack when quantum is unavailable or the modulus is too large.
+
+---
 
 ## Disclaimer
 
 This tool is intended exclusively for authorised security testing on systems you own or have explicit permission to test. Unauthorised use is illegal. The authors accept no liability for misuse.
+
+---
 
 ## Installation
 
@@ -40,6 +52,7 @@ This tool is intended exclusively for authorised security testing on systems you
 - Python 3.9 or later
 - Mullvad CLI (optional, for VPN rotation)
 - A valid Mullvad account if VPN rotation is desired
+- An **OpenQuantum account** (free tier available) if you want to use quantum acceleration – you’ll need a Client ID and Client Secret from the dashboard.
 
 ### From source
 
@@ -61,6 +74,52 @@ All required packages are declared in `pyproject.toml` and installed automatical
 - `pyasn1>=0.4.8`
 - `cryptography>=41.0.0`
 - `aiohttp>=3.9.0`
+- `qiskit>=1.0.0`
+- `openquantum-sdk>=0.3.7`
+- `openquantum-sdk-qiskit>=0.1.0`
+- `python-dotenv>=1.0.0`
+
+---
+
+## Quantum Acceleration Setup
+
+To enable quantum factoring, you must **save your OpenQuantum credentials once** using the SDK. This stores the Client ID and Client Secret in your local keyring.
+
+### 1. Get your credentials
+
+Log in to [OpenQuantum Dashboard](https://openquantum.com) → **SDK Keys** → create a new key. Copy the **Client ID** and **Client Secret** (the secret is shown only once – save it immediately).
+
+### 2. Save the credentials
+
+Run the following command (replace `YOUR_CLIENT_ID` and `YOUR_CLIENT_SECRET` with your actual values):
+
+```bash
+python -c "
+from openquantum_sdk.auth import ClientCredentials
+from openquantum_sdk.qiskit import OpenQuantumService
+
+OpenQuantumService.save_account(
+    name='default',
+    creds=ClientCredentials(
+        client_id='YOUR_CLIENT_ID',
+        client_secret='YOUR_CLIENT_SECRET'
+    ),
+    use_keyring=True
+)
+print('Credentials saved successfully!')
+"
+```
+
+Alternatively, you can set environment variables:
+
+```bash
+export OPENQUANTUM_CLIENT_ID=your_client_id
+export OPENQUANTUM_CLIENT_SECRET=your_client_secret
+```
+
+**Note:** The environment variables are used by the core SDK, but the Qiskit provider may still require the `save_account` step to fetch backend capabilities – so it’s recommended to run the `save_account` command at least once.
+
+---
 
 ## Usage
 
@@ -73,8 +132,8 @@ sslpwn --scan https://target.com
 Scans for all eleven vulnerabilities concurrently using asyncio. A report is written to `reports/<hostname>/report.{md,txt,html}`. If vulnerabilities are found, you will be asked whether to exploit them. Use `-y` to skip the prompt.
 
 **Credentials for exploitation:**
-- Cookie-based attacks (BEAST, Lucky13, POODLE, Heartbleed, Ticketbleed, ROBOT, Renegotiation) require `--cookie-name` and `--cookie-value`.
-- Compression-based attacks (BREACH, CRIME) require `--token-parameter`.
+- Cookie‑based attacks (BEAST, Lucky13, POODLE, Heartbleed, Ticketbleed, ROBOT, Renegotiation) require `--cookie-name` and `--cookie-value`.
+- Compression‑based attacks (BREACH, CRIME) require `--token-parameter`.
 
 If these are not provided on the command line, the tool will ask for them interactively after the scan.
 
@@ -84,18 +143,28 @@ If these are not provided on the command line, the tool will ask for them intera
 sslpwn --module beast https://target.com --cookie-name session --cookie-value supersecret
 ```
 
-### Command-line options
+### With quantum acceleration
+
+```bash
+sslpwn --scan https://target.com --quantum --quantum-backend rigetti:cepheus-1-108q
+```
+
+The tool will automatically attempt to factor any RSA modulus **≤ 512 bits** using Shor’s algorithm on the specified QPU. For larger moduli, it falls back to classical attacks.
+
+---
+
+### Command‑line options
 
 | Option | Description |
 |--------|-------------|
 | `target` | Target HTTPS URL |
 | `--scan` | Scan for all vulnerabilities, then optionally exploit |
 | `--module` | Exploit a single module (choices: `beast`, `lucky13`, `breach`, `poodle`, `crime`, `heartbleed`, `ticketbleed`, `robot`, `renegotiation`, `freak`, `logjam`) |
-| `--cookie-name` | Cookie name to decrypt (cookie-based modules) |
+| `--cookie-name` | Cookie name to decrypt (cookie‑based modules) |
 | `--cookie-value` | Known test cookie value |
 | `--token-parameter` | GET parameter that reflects a secret (BREACH/CRIME) |
 | `--mask-length` | Mask length for BREACH/CRIME (default 10) |
-| `--user-agent-file` | File with custom User-Agent strings (one per line) |
+| `--user-agent-file` | File with custom User‑Agent strings (one per line) |
 | `--rate` | Requests per second (default 2.0) |
 | `--output-dir` | Directory for output files (default: current directory) |
 | `--no-vpn` | Disable Mullvad VPN rotation |
@@ -104,32 +173,34 @@ sslpwn --module beast https://target.com --cookie-name session --cookie-value su
 | `--adaptive-backoff-base` | Initial backoff time in seconds (default 1.0) |
 | `--adaptive-max-backoff` | Maximum backoff time in seconds (default 60.0) |
 | `--threads` | Number of concurrent tasks for scanning (default 4) |
-| `-y`, `--yes` | Auto-answer yes to exploitation prompt |
+| `-y`, `--yes` | Auto‑answer yes to exploitation prompt |
 | `--version` | Show version and exit |
+| **Quantum options** | |
+| `--quantum` | Enable quantum acceleration using OpenQuantum Qiskit provider |
+| `--quantum-backend` | OpenQuantum backend ID (default: `rigetti:cepheus-1-108q`) |
+| `--quantum-shots` | Number of shots for quantum circuits (default 1024) |
+| `--quantum-timeout` | Timeout in seconds for quantum jobs (default 600) |
+
+---
 
 ### Examples
 
-Scan with adaptive evasion and 8 concurrent tasks, auto-exploit:
+Scan with adaptive evasion, 8 concurrent tasks, auto‑exploit, and quantum acceleration:
 
 ```bash
 sslpwn --scan https://vulnerable.example.com -y \
     --cookie-name session --cookie-value abc123 \
-    --token-parameter q --adaptive --threads 8
+    --token-parameter q --adaptive --threads 8 --quantum
 ```
 
-Scan with custom evasion thresholds:
+Exploit a single module with quantum factoring:
 
 ```bash
-sslpwn --scan https://target.com --adaptive --adaptive-threshold 2 \
-    --adaptive-backoff-base 2.0 --adaptive-max-backoff 120 --threads 4
+sslpwn --module robot https://target.com \
+    --cookie-name auth_token --cookie-value xyz789 --quantum
 ```
 
-Exploit a single module with adaptive evasion:
-
-```bash
-sslpwn --module lucky13 https://target.com \
-    --cookie-name auth_token --cookie-value xyz789 --adaptive
-```
+---
 
 ## How it works
 
@@ -143,24 +214,37 @@ Scanning is performed asynchronously using `asyncio` and `aiohttp`. Each attack 
 - Heartbleed: send a heartbeat request and verify the response.
 - Ticketbleed: send a ClientHello with a malformed SessionTicket extension and look for a NewSessionTicket message.
 - ROBOT: check if the server offers an RSA key exchange cipher.
-- Renegotiation: attempt a client-initiated renegotiation.
+- Renegotiation: attempt a client‑initiated renegotiation.
 - FREAK: check if export RSA ciphers are accepted.
 - Logjam: check if export DHE ciphers are accepted.
 
 ### Exploitation
 
-After the scan, full exploits are available. Each module's `exploit()` method performs the actual cryptographic attack and verifies the result against a known test secret. For cookie-based attacks, the tool decrypts the supplied cookie from the encrypted traffic. For compression-based attacks, it recovers the reflected token byte by byte. Renegotiation injects a plaintext request into an existing TLS session. FREAK and Logjam log the server's weak public parameters for offline factoring.
+After the scan, full exploits are available. Each module's `exploit()` method performs the actual cryptographic attack and verifies the result against a known test secret. For cookie‑based attacks, the tool decrypts the supplied cookie from the encrypted traffic. For compression‑based attacks, it recovers the reflected token byte by byte. Renegotiation injects a plaintext request into an existing TLS session. FREAK and Logjam log the server's weak public parameters for offline factoring.
+
+### Quantum Factoring (ROBOT attack)
+
+When `--quantum` is enabled and the server offers an RSA key exchange:
+
+1. The tool extracts the RSA modulus (N) from the server certificate.
+2. If N is **≤ 512 bits**, it builds a Shor’s algorithm circuit using Qiskit (with `n` qubits for the modulus and `2n` for the exponent, plus auxiliaries).
+3. The circuit is transpiled, submitted to the OpenQuantum backend using the `OQSampler` primitive, and polled for completion.
+4. Measurement counts are post‑processed using continued fractions to find the period `r`.
+5. From `r`, factors `p` and `q` are computed, and the private exponent `d` is derived to decrypt the captured premaster secret.
+6. If quantum fails or N is too large, the tool falls back to the classical Bleichenbacher padding‑oracle attack.
 
 ### Adaptive evasion
 
-When enabled with `--adaptive`, the tool monitors HTTP status codes (403, 404, 420, 429, 500, 502, 503), `Retry-After` headers, and connection errors. If the number of consecutive indicators reaches the threshold, an evasion cycle is triggered:
+When enabled with `--adaptive`, the tool monitors HTTP status codes (403, 404, 420, 429, 500, 502, 503), `Retry‑After` headers, and connection errors. If the number of consecutive indicators reaches the threshold, an evasion cycle is triggered:
 
 1. Exponential backoff with random jitter.
 2. VPN IP rotation (if available), using the new device profile's country code to select an exit node.
-3. Replacement of the entire browser fingerprint: User-Agent, Sec-CH-UA headers, viewport, screen resolution, colour depth, DPR, device memory, and TLS cipher preferences.
-4. Generation of a new self-signed X.509 client certificate with subject fields matching the selected profile.
+3. Replacement of the entire browser fingerprint: User‑Agent, Sec‑CH‑UA headers, viewport, screen resolution, colour depth, DPR, device memory, and TLS cipher preferences.
+4. Generation of a new self‑signed X.509 client certificate with subject fields matching the selected profile.
 
 This cycle repeats each time rate limiting is detected, making successive requests appear to originate from different devices, browsers, and geographic locations.
+
+---
 
 ## Output and reports
 
@@ -172,6 +256,8 @@ Results are saved in `reports/<hostname>/` as three files:
 
 A raw log file `<hostname>_sslpwn_results.txt` is also written to the output directory. If the tool is interrupted with Ctrl+C, pending results are saved before exit.
 
+---
+
 ## Planned updates (v3)
 
 The following features are under development for the next release:
@@ -181,6 +267,8 @@ The following features are under development for the next release:
 - **Proxy chain support**: Chaining of SOCKS5 and HTTP proxies before the VPN exit for additional anonymity layers.
 - **Custom JA3/JA4 fingerprint injection**: Full control over the TLS client hello fingerprint to mimic specific browsers beyond the currently supported ciphers.
 - **Additional exploits**: DROWN, POODLE TLS, Zombie POODLE, and GOLDENDOODLE attacks.
+
+---
 
 ## License
 
@@ -192,4 +280,4 @@ Contributions are welcome. Please ensure code passes standard Python linters, ne
 
 ## Acknowledgements
 
-This project combines and extends public proofs of concept for the listed vulnerabilities into a single tool for practical security testing.
+This project combines and extends public proofs of concept for the listed vulnerabilities into a single tool for practical security testing. Quantum acceleration powered by [OpenQuantum](https://openquantum.com) and the Rigetti Cepheus‑1‑108Q QPU.
