@@ -9,12 +9,13 @@ import logging
 import ssl
 import tempfile
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from sslpwn.rate_limiter import RateLimiter
 from sslpwn.user_agents import UserAgentRotator
 from sslpwn.vpn import MullvadVPN
 from sslpwn.device_profiles import DeviceProfile
+from sslpwn.qrng import get_qrng, quantum_random_int
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class AdaptiveManager:
         base_backoff: float = 1.0,
         max_backoff: float = 60.0,
         error_threshold: int = 3,
+        pUseQuantumRNG: bool = False,
     ) -> None:
         self._limiter = rate_limiter
         self._ua_rotator = user_agents
@@ -35,6 +37,7 @@ class AdaptiveManager:
         self._base_backoff = base_backoff
         self._max_backoff = max_backoff
         self._error_threshold = error_threshold
+        self._qrng = get_qrng() if pUseQuantumRNG else None
 
         self._consecutive_errors = 0
         self._current_backoff = base_backoff
@@ -49,11 +52,19 @@ class AdaptiveManager:
             self._evade()
 
         if self._current_profile is None:
-            self._current_profile = self._ua_rotator.random_profile()
+            self._current_profile = self._select_profile()
             self._generate_cert()
 
         self._limiter.wait()
         return self._current_profile
+
+    def _select_profile(self) -> DeviceProfile:
+        """Select a device profile using QRNG if available."""
+        profiles = self._ua_rotator._profiles
+        if self._qrng and len(profiles) > 1:
+            idx = self._qrng.get_random_int(0, len(profiles) - 1)
+            return profiles[idx]
+        return self._ua_rotator.random_profile()
 
     def report_response(
         self,
@@ -61,7 +72,7 @@ class AdaptiveManager:
         headers: Optional[Dict[str, str]] = None,
         error: Optional[str] = None,
     ) -> None:
-        """Inform the manager of the outcome of a request. I added other resp codes js in case. """
+        """Inform the manager of the outcome of a request."""
         is_rate_limited = False
         if status in (403, 404, 420, 429, 500, 502, 503):
             is_rate_limited = True
@@ -84,12 +95,20 @@ class AdaptiveManager:
             self._current_backoff = self._base_backoff
 
     def _evade(self) -> None:
-        """Perform full evasion: backoff, VPN rotation with country match, profile & cert swap."""
+        """Perform full evasion: backoff, VPN rotation, profile & cert swap."""
         backoff = min(
             self._current_backoff * (2 ** (self._consecutive_errors - self._error_threshold)),
             self._max_backoff,
         )
-        backoff *= random.uniform(0.8, 1.2)
+        # Quantum jitter if available
+        if self._qrng:
+            jitter_min = int(0.8 * 1000)
+            jitter_max = int(1.2 * 1000)
+            jitter = self._qrng.get_random_int(jitter_min, jitter_max) / 1000.0
+            backoff *= jitter
+        else:
+            backoff *= random.uniform(0.8, 1.2)
+
         logger.info("Backing off for %.1f seconds", backoff)
         time.sleep(backoff)
 
@@ -97,7 +116,7 @@ class AdaptiveManager:
         self._cleanup_cert()
 
         # Swap to a fresh device profile
-        self._current_profile = self._ua_rotator.random_profile()
+        self._current_profile = self._select_profile()
         self._generate_cert()
 
         # Rotate VPN, using the profile's country code if set
@@ -116,14 +135,23 @@ class AdaptiveManager:
 
     def _generate_cert(self) -> None:
         """Generate a self‑signed client certificate matching the current profile."""
-        profile = self._current_profile
         from cryptography import x509
         from cryptography.x509.oid import NameOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
         import datetime
 
+        profile = self._current_profile
+
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        # Quantum random serial number if available
+        if self._qrng:
+            serial_bytes = self._qrng.get_random_bytes(16)
+            serial = int.from_bytes(serial_bytes, 'big')
+        else:
+            serial = x509.random_serial_number()
+
         subject = x509.Name([
             x509.NameAttribute(NameOID.COMMON_NAME, profile.cert_common_name),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, profile.cert_org),
@@ -135,7 +163,7 @@ class AdaptiveManager:
             .subject_name(subject)
             .issuer_name(subject)
             .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
+            .serial_number(serial)
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(days=1))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
